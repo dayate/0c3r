@@ -57,6 +57,7 @@ HARDSUB_EP_DIR = os.path.join(BASE_OUT_DIR, "episodes_hardsub_id")
 MERGED_DIR = os.path.join(BASE_OUT_DIR, "merged")
 WORK_DIR = os.path.join(BASE_OUT_DIR, "work")
 CACHE_PATH = os.path.join(WORK_DIR, "translate_cache.json")
+CACHE_PROV_PATH = os.path.join(WORK_DIR, "translate_cache_prov.json")
 
 for d in (PER_EP_DIR, HARDSUB_EP_DIR, MERGED_DIR, WORK_DIR):
     os.makedirs(d, exist_ok=True)
@@ -85,12 +86,28 @@ if os.path.exists(CACHE_PATH):
     except Exception:
         _cache = {}
 
+# Provider per baris cache: "deepl" / "google" / "mymemory" / "llm" /
+# "polished" / tidak ada (= cache lama, provider tidak tercatat).
+# Dipakai polish supaya baris yang sudah di-polish tidak di-polish lagi
+# di run berikutnya, dan baris DeepL tidak ikut di-polish.
+_cache_prov = {}
+if os.path.exists(CACHE_PROV_PATH):
+    try:
+        with open(CACHE_PROV_PATH, encoding="utf-8") as f:
+            _cache_prov = json.load(f)
+    except Exception:
+        _cache_prov = {}
+
 
 def save_cache():
     tmp = CACHE_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(_cache, f, ensure_ascii=False, indent=2)
     os.replace(tmp, CACHE_PATH)
+    tmp = CACHE_PROV_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(_cache_prov, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, CACHE_PROV_PATH)
 
 print("Episodes dir         :", EPISODES_DIR)
 print("Per-episode SRT/JSON :", PER_EP_DIR)

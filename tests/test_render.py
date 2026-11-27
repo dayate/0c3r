@@ -135,3 +135,21 @@ segs6 = [{"text_zh": "我想好了"}]
 segs6, failed6 = lp.translate_segments(segs6)
 assert segs6[0]["text_id"] == "Sudah dipikirkan dengan baik", segs6
 print("TRANSLATE POLISH OK")
+
+# Polish jalan untuk baris cache lama (provider tidak tercatat), sekali saja
+os.environ["TIPROUTER_API_KEY"] = "test-key"
+lp._cache.clear()
+lp._cache_prov.clear()
+lp._cache["我想好了"] = "Sudah dipikirkan dengan baik"
+lp.llm_translate = lambda lines, system=None: ["Aku sudah memutuskannya" for _ in lines]
+segs7 = [{"text_zh": "我想好了"}]
+segs7, _ = lp.translate_segments(segs7)
+assert segs7[0]["text_id"] == "Aku sudah memutuskannya", segs7
+assert lp._cache_prov.get("我想好了") == "polished", lp._cache_prov
+calls7 = []
+lp.llm_translate = lambda lines, system=None: calls7.append(lines) or ["X"]
+segs7b, _ = lp.translate_segments(segs7)
+assert calls7 == [], "baris yang sudah di-polish jangan di-polish lagi"
+assert segs7b[0]["text_id"] == "Aku sudah memutuskannya", segs7b
+del os.environ["TIPROUTER_API_KEY"]
+print("TRANSLATE POLISH CACHE OK")

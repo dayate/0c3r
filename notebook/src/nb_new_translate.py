@@ -315,12 +315,14 @@ def translate_segments(segs):
             _cache[zh] = out
             stats["deepl"] += 1
             prov_of[zh] = "deepl"
+            _cache_prov[zh] = "deepl"
             continue
         out, prov = google_translate(zh)
         if out and out != zh:
             _cache[zh] = out
             stats[prov] += 1
             prov_of[zh] = prov
+            _cache_prov[zh] = prov
         else:
             failed.append(zh)
         if n % 10 == 0:
@@ -337,6 +339,7 @@ def translate_segments(segs):
                     if id_ and id_ != zh and not has_mandarin(id_):
                         _cache[zh] = id_
                         stats["llm"] += 1
+                        _cache_prov[zh] = "llm"
             print(f"  [tr] LLM {min(i + LLM_BATCH, len(failed))}/{len(failed)}", flush=True)
             save_cache()
 
@@ -350,21 +353,25 @@ def translate_segments(segs):
             out = llm_translate_single(zh)
             if out:
                 _cache[zh] = out
+                _cache_prov[zh] = "llm"
                 stats["llm"] += 1
             if n % 5 == 0:
                 save_cache()
         save_cache()
 
     # Polish LLM: baris dari MyMemory/Google ditulis ulang supaya natural.
-    # DeepL tidak ikut (kualitasnya sudah bagus), baris dari cache tidak
-    # ikut (provider asalnya tidak tercatat). Hasil polish dipakai hanya
-    # kalau bersih dari Mandarin dan panjangnya wajar (0.5x-2x aslinya).
+    # DeepL tidak ikut (kualitasnya sudah bagus), baris dari cache lama
+    # (provider tidak tercatat) ikut sekali lalu ditandai "polished"
+    # supaya tidak di-polish lagi di run berikutnya.
     if POLISH_WITH_LLM and TIPROUTER_API_KEY:
-        cands = [zh for zh in uniq
-                 if prov_of.get(zh) in ("mymemory", "google")
+        all_zh = list(dict.fromkeys(
+            (s.get("text_zh") or "").strip() for s in segs
+            if (s.get("text_zh") or "").strip()))
+        cands = [zh for zh in all_zh
+                 if _cache_prov.get(zh) in (None, "mymemory", "google")
                  and _cache.get(zh) and not has_mandarin(_cache[zh])]
         if cands:
-            print(f"  [tr] polish LLM {len(cands)} baris (MyMemory/Google)", flush=True)
+            print(f"  [tr] polish LLM {len(cands)} baris (MyMemory/Google/cache lama)", flush=True)
             for i in range(0, len(cands), LLM_BATCH):
                 chunk = cands[i:i + LLM_BATCH]
                 out = llm_polish([_cache[zh] for zh in chunk])
@@ -374,6 +381,7 @@ def translate_segments(segs):
                         if (id_ and id_ != old and not has_mandarin(id_)
                                 and 0.5 * len(old) <= len(id_) <= 2.0 * len(old)):
                             _cache[zh] = _clean_id(id_)
+                            _cache_prov[zh] = "polished"
                             stats["polish"] += 1
                 print(f"  [tr] polish {min(i + LLM_BATCH, len(cands))}/{len(cands)}", flush=True)
             save_cache()
@@ -424,8 +432,20 @@ for i, vid_path in enumerate(videos, 1):
     missing = sum(1 for s in segs if (s.get("text_zh") or "").strip()
                   and not (s.get("text_id") or "").strip())
     if not missing and os.path.exists(out_id_srt):
-        # Sudah diterjemah, tapi segmennya bisa jadi belum dinormalisasi
-        # (SRT sempat ditulis sebelum validator gagal di versi lama).
+        # Sudah diterjemah, tapi: kartu nama mungkin belum dibuang, baris
+        # MyMemory/Google/cache lama belum di-polish, kutip belum dibersihkan.
+        # Jalankan translate_segments: semua baris dari cache, jadi tidak ada
+        # terjemahan ulang — hanya polish + cleanup yang jalan.
+        segs, failed_final = translate_segments(segs)
+        payload["segments"] = segs
+        if failed_final:
+            review_path = os.path.join(PER_EP_DIR, f"{stem}_review.json")
+            write_json_atomic(review_path, {"episode": stem, "failed": failed_final})
+            print(f"[tr] {i}/{len(videos)} {stem}: GAGAL {len(failed_final)} baris, "
+                  f"daftar review: {review_path}", flush=True)
+            raise RuntimeError(
+                f"translate gagal {len(failed_final)} baris di {stem} "
+                f"(lihat {review_path})")
         # Rapikan dan tulis ulang kalau ada yang berubah — tanpa ini
         # cell akan skip dan SRT yang lama (overlap) tetap dipakai.
         segs, _nstats = normalize_segments(segs)

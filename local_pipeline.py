@@ -521,24 +521,31 @@ def extract_segments(vid_path, dur):
 
 # ───────────────────────── translate ─────────────────────────
 _cache = {}
+_cache_prov = {}  # provider per baris cache (lihat nb_new_config.py)
 _deepl = None
 _google = None
 _mymemory = None
 
 
 def load_cache():
-    global _cache
+    global _cache, _cache_prov
     try:
         with open(TR_CACHE_PATH, encoding="utf-8") as f:
             _cache = json.load(f)
     except Exception:
         _cache = {}
+    try:
+        with open(os.path.join(CACHE_DIR, "translate_cache_prov.json"), encoding="utf-8") as f:
+            _cache_prov = json.load(f)
+    except Exception:
+        _cache_prov = {}
     log.info("cache terjemahan dimuat: %d entri", len(_cache))
 
 
 def save_cache():
     os.makedirs(CACHE_DIR, exist_ok=True)
     write_json_atomic(TR_CACHE_PATH, _cache)
+    write_json_atomic(os.path.join(CACHE_DIR, "translate_cache_prov.json"), _cache_prov)
 
 
 def _strip_json(txt):
@@ -706,12 +713,14 @@ def translate_segments(segs):
             _cache[zh] = out
             stats["deepl"] += 1
             prov_of[zh] = "deepl"
+            _cache_prov[zh] = "deepl"
             continue
         out, prov = google_translate(zh)
         if out and out != zh:
             _cache[zh] = out
             stats[prov] += 1
             prov_of[zh] = prov
+            _cache_prov[zh] = prov
         else:
             failed.append(zh)
         if n % 10 == 0:
@@ -727,6 +736,7 @@ def translate_segments(segs):
                 for zh, id_ in zip(chunk, out):
                     if id_ and id_ != zh and not has_mandarin(id_):
                         _cache[zh] = id_
+                        _cache_prov[zh] = "llm"
                         stats["llm"] += 1
             log.info("[tr] LLM %d/%d", min(i + LLM_BATCH, len(failed)), len(failed))
             save_cache()
@@ -739,18 +749,24 @@ def translate_segments(segs):
             out = llm_translate_single(zh)
             if out:
                 _cache[zh] = out
+                _cache_prov[zh] = "llm"
                 stats["llm"] += 1
             if n % 5 == 0:
                 save_cache()
         save_cache()
 
-    # Polish LLM: baris dari MyMemory/Google ditulis ulang supaya natural.
+    # Polish LLM: baris dari MyMemory/Google/cache lama ditulis ulang supaya
+    # natural. DeepL tidak ikut; baris yang sudah di-polish ditandai supaya
+    # tidak di-polish lagi di run berikutnya.
     if POLISH_WITH_LLM and (os.environ.get("TIPROUTER_API_KEY") or "").strip():
-        cands = [zh for zh in uniq
-                 if prov_of.get(zh) in ("mymemory", "google")
+        all_zh = list(dict.fromkeys(
+            (s.get("text_zh") or "").strip() for s in segs
+            if (s.get("text_zh") or "").strip()))
+        cands = [zh for zh in all_zh
+                 if _cache_prov.get(zh) in (None, "mymemory", "google")
                  and _cache.get(zh) and not has_mandarin(_cache[zh])]
         if cands:
-            log.info("[tr] polish LLM %d baris (MyMemory/Google)", len(cands))
+            log.info("[tr] polish LLM %d baris (MyMemory/Google/cache lama)", len(cands))
             for i in range(0, len(cands), LLM_BATCH):
                 chunk = cands[i:i + LLM_BATCH]
                 out = llm_polish([_cache[zh] for zh in chunk])
@@ -760,6 +776,7 @@ def translate_segments(segs):
                         if (id_ and id_ != old and not has_mandarin(id_)
                                 and 0.5 * len(old) <= len(id_) <= 2.0 * len(old)):
                             _cache[zh] = _clean_id(id_)
+                            _cache_prov[zh] = "polished"
                             stats["polish"] += 1
                 log.info("[tr] polish %d/%d", min(i + LLM_BATCH, len(cands)), len(cands))
             save_cache()
