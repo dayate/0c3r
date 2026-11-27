@@ -41,7 +41,12 @@ baris yang gagal di semua translator gratis dibiarkan teks Mandarin aslinya.
 .\.venv\Scripts\python.exe local_pipeline.py                 # semua video di input/
 .\.venv\Scripts\python.exe local_pipeline.py --limit 1       # 1 episode (tes)
 .\.venv\Scripts\python.exe local_pipeline.py --no-render     # OCR+translate+SRT saja
+.\.venv\Scripts\python.exe local_pipeline.py --profile vm    # profil lain (pc, vm, instabox)
 ```
+
+Profil per device ada di `profiles.yaml` (colab, kaggle, pc, vm, instabox —
+Termux sengaja tidak ada, tidak direkomendasikan). Default lokal adalah `pc`.
+Ganti profil = fingerprint berubah = checkpoint/cache lama tidak dipakai.
 
 Folder: `input/` (taruh video), `output/per_episode/` (SRT + JSON), `output/hardsub/`
 (MP4 per episode), `output/merged/` (gabungan + chapters), `work/` (cache & checkpoint),

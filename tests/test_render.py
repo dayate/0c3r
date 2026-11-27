@@ -219,3 +219,37 @@ import json as _json2
 assert _json2.loads(_json2.dumps(_fp)) == _fp, _fp
 assert isinstance(_fp["roi"], list), _fp
 print("LOCAL FINGERPRINT ROUNDTRIP OK")
+
+# --- profil per device (2026-11-27): satu kode, setting per device ---
+import importlib.util as _ilu2
+if _ilu2.find_spec("yaml") is not None:
+    _profs = lp.load_profiles()
+    assert set(_profs) == {"colab", "kaggle", "pc", "vm", "instabox"}, set(_profs)
+    assert "termux" not in _profs, "termux sengaja tidak ada (tidak direkomendasikan)"
+    for _name, _p in _profs.items():
+        for _k in ("platform", "episodes_dir", "base_out_dir", "fps", "roi",
+                   "min_conf", "upscale", "whisper_model", "whisper_beam", "blur_mode"):
+            assert _k in _p, (_name, _k)
+    assert _profs["colab"]["mount_drive"] is True
+    assert _profs["kaggle"]["mount_drive"] is False
+    assert _profs["kaggle"]["episodes_dir"].startswith("/kaggle/input/")
+    assert _profs["colab"]["fps"] == 1.0 and _profs["colab"]["whisper_model"] == "large-v3-turbo"
+    assert _profs["colab"]["whisper_beam"] == 5
+    assert _profs["pc"]["fps"] == 0.5 and _profs["pc"]["whisper_model"] == "small"
+    assert _profs["pc"]["whisper_beam"] == 1
+    lp.apply_profile("colab")
+    assert lp.PROFILE == "colab" and lp.FPS == 1.0
+    assert lp.WHISPER_MODEL == "large-v3-turbo" and lp.WHISPER_BEAM == 5
+    assert lp.fingerprint()["profile"] == "colab"
+    assert lp._whisper_fingerprint()["profile"] == "colab"
+    lp.apply_profile("pc")
+    assert lp.PROFILE == "pc" and lp.FPS == 0.5 and lp.WHISPER_MODEL == "small"
+    assert lp.fingerprint()["profile"] == "pc"
+    try:
+        lp.apply_profile("termux")
+        raise AssertionError("profil termux harus ditolak")
+    except ValueError:
+        pass
+    print("LOCAL PROFILES OK")
+else:
+    print("LOCAL PROFILES SKIP (pyyaml tidak terpasang)")

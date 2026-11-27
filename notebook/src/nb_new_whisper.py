@@ -91,6 +91,7 @@ def probe(path):
 
 def _whisper_fingerprint():
     return {
+        "profile": globals().get("PROFILE", "colab"),
         "model": WHISPER_MODEL,
         "lang": WHISPER_LANG,
         "vad_filter": False,

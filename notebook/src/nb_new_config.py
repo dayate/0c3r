@@ -1,17 +1,26 @@
 import json, os
 
-# ================= EDIT BAGIAN INI =================
+# ================= PILIH PROFIL =================
+# Profil menyesuaikan device: colab / kaggle / pc / vm / instabox.
+# Generator (build_colab_nb.py --profile) mengisi PROFILES + PROFILE di
+# bawah ini; kalau cell ini dijalankan apa adanya, yang dipakai adalah
+# nilai default profil colab. Ganti PROFILE lalu jalankan ulang cell ini
+# untuk pindah profil tanpa generate ulang. Ganti profil = fingerprint
+# berubah = cache/checkpoint lama tidak dipakai.
+PROFILE = "colab"  # __PROFILE_NAME__
+PROFILES = {}  # __PROFILES_JSON__
+
+# ================= EDIT BAGIAN INI (default profil colab) =================
 EPISODES_DIR = "/content/drive/MyDrive/duanju/episodes"
 BASE_OUT_DIR = "/content/drive/MyDrive/duanju/suba_hardsub"
 MAX_EPISODES = 200
 
 # --- Parameter OCR ---
-FPS = 0.5               # sampling; 0.5 lebih cepat, timing kasar diperbaiki
-                        # fusi Whisper (1 fps hanya kalau butuh presisi OCR
-                        # mentah tanpa Whisper)
-ROI = (0.05, 0.62, 0.95, 0.93)   # (x_min, y_min, x_max, y_max) rasio 0.0 - 1.0
-MIN_CONF = 0.65
-UPSCALE = 2             # 1080p+up2 seakurat 960+up3, 1.6x lebih cepat
+FPS = 1.0               # colab/kaggle 1 fps (Whisper GPU cepat, OCR 2 vCPU
+                        # masih sanggup); pc/vm 0,5 fps
+ROI = (0.05, 0.55, 0.95, 0.93)   # (x_min, y_min, x_max, y_max) rasio 0.0 - 1.0
+MIN_CONF = 0.55         # nilai hasil tuning episode 1 di Colab
+UPSCALE = 3             # nilai hasil tuning episode 1 di Colab
 MAX_WIDTH = 1080        # frame lebih lebar dari ini di-resize sebelum crop
 BATCH_SIZE = 8          # frame per panggilan OCR (det per frame, rec satu batch)
 MIN_DUR = 0.35          # segmen lebih pendek dari ini dibuang
@@ -21,11 +30,10 @@ CHUNK_SECONDS = 600     # checkpoint OCR per chunk, aman di-interrupt
 
 # --- Parameter Whisper (timing) ---
 # Whisper HANYA dipakai buat timing + cadangan; teks tetap dari OCR.
-# Karena itu model kecil sudah cukup: "small" ~4-6x lebih cepat dari
-# large-v3-turbo di CPU, timing kata-nya tetap rapat. Kalau butuh akurasi
-# penuh, ganti ke "large-v3-turbo" (lebih lambat, download ~1,6 GB).
-WHISPER_MODEL = "small"
-WHISPER_BEAM = 1        # 1 = greedy, tercepat (beam 5 sedikit lebih akurat)
+# Di GPU (colab/kaggle) large-v3-turbo tetap cepat; di CPU (pc/vm)
+# pakai "small" beam 1 yang ~4-6x lebih cepat.
+WHISPER_MODEL = "large-v3-turbo"
+WHISPER_BEAM = 5        # beam 5 (di CPU pakai 1 = greedy, tercepat)
 WHISPER_LANG = "zh"
 
 # --- Parameter Blur & Hardsub ---
@@ -62,6 +70,26 @@ POLISH_WITH_LLM = True
 TIPROUTER_API_KEY = ""   # <-- tempel di sini kalau tidak pakai Colab secret
 DEEPL_API_KEY = ""
 # ===================================================
+
+# --- Terapkan profil (menimpa nilai default di atas) ---
+_p = PROFILES.get(PROFILE, {}) if isinstance(PROFILES, dict) else {}
+if _p:
+    EPISODES_DIR = _p.get("episodes_dir", EPISODES_DIR)
+    BASE_OUT_DIR = _p.get("base_out_dir", BASE_OUT_DIR)
+    FPS = float(_p.get("fps", FPS))
+    ROI = tuple(_p.get("roi", ROI))
+    MIN_CONF = float(_p.get("min_conf", MIN_CONF))
+    UPSCALE = int(_p.get("upscale", UPSCALE))
+    MAX_WIDTH = int(_p.get("max_width", MAX_WIDTH))
+    BATCH_SIZE = int(_p.get("batch_size", BATCH_SIZE))
+    MIN_DUR = float(_p.get("min_dur", MIN_DUR))
+    WHISPER_MODEL = _p.get("whisper_model", WHISPER_MODEL)
+    WHISPER_BEAM = int(_p.get("whisper_beam", WHISPER_BEAM))
+    BLUR_MODE = _p.get("blur_mode", BLUR_MODE)
+    BLUR_RADIUS = int(_p.get("blur_radius", BLUR_RADIUS))
+    BLUR_TIME_PAD = float(_p.get("blur_time_pad", BLUR_TIME_PAD))
+    ALWAYS_BLUR = bool(_p.get("always_blur", ALWAYS_BLUR))
+    print("Profil:", PROFILE, "|", _p.get("note", ""))
 
 PER_EP_DIR = os.path.join(BASE_OUT_DIR, "per_episode")
 HARDSUB_EP_DIR = os.path.join(BASE_OUT_DIR, "episodes_hardsub_id")

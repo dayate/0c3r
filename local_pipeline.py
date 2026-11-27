@@ -23,6 +23,9 @@ Env:
   DEEPL_API_KEY      (opsional, fallback kedua)
 
 Contoh:  .venv\\Scripts\\python.exe local_pipeline.py --limit 1
+         .venv\\Scripts\\python.exe local_pipeline.py --profile vm --limit 1
+Profil per device: profiles.yaml (pc, vm, instabox, colab, kaggle).
+Notebook pakai profil colab/kaggle (dipilih di cell konfigurasi).
 """
 
 import argparse
@@ -71,22 +74,77 @@ CFG = _load_config()
 CHUNK_SECONDS = int(CFG.get("MAX_CHUNK_DURATION") or CFG.get("CHUNK_SECONDS") or 600)
 MAX_EPISODES = int(CFG.get("MAX_EPISODES") or 0)  # 0 = semua
 
-FPS = float(CFG.get("FPS") or 0.5)  # sampling; 0.5 lebih cepat, timing kasar
-                        # diperbaiki fusi Whisper (1 fps hanya kalau butuh
-                        # presisi OCR mentah tanpa Whisper)
+# ── Profil per device (profiles.yaml, 2026-11-27) ──
+# Satu kode, setting per device. Urutan menang: default bawaan <- profil
+# <- suba_config.json. Tanpa PyYAML / tanpa file, pipeline tetap jalan
+# dengan default bawaan (profil pc). Ganti profil = fingerprint berubah =
+# cache/checkpoint lama tidak dipakai (benar: setting beda).
+def load_profiles():
+    import yaml
+    with open(os.path.join(BASE_DIR, "profiles.yaml"), encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    defaults = data.get("defaults") or {}
+    out = {}
+    for name, prof in (data.get("profiles") or {}).items():
+        merged = dict(defaults)
+        merged.update(prof or {})
+        out[name] = merged
+    return out
+
+
+def apply_profile(name):
+    global PROFILE, FPS, ROI, MIN_CONF, UPSCALE, MAX_WIDTH, BATCH_SIZE, MIN_DUR
+    global WHISPER_MODEL, WHISPER_BEAM, BLUR_MODE, BLUR_RADIUS, BLUR_TIME_PAD, ALWAYS_BLUR
+    profiles = load_profiles()
+    if name not in profiles:
+        raise ValueError(
+            f"profil '{name}' tidak ada di profiles.yaml "
+            f"(ada: {', '.join(sorted(profiles))})")
+    p = profiles[name]
+    PROFILE = name
+    # Whisper HANYA untuk timing + cadangan; teks tetap dari OCR.
+    FPS = float(CFG.get("FPS") or p.get("fps") or 0.5)  # 0.5 lebih cepat,
+                        # timing kasar diperbaiki fusi Whisper (1 fps hanya
+                        # kalau butuh presisi OCR mentah tanpa Whisper)
+    ROI = tuple(p.get("roi") or (0.05, 0.62, 0.95, 0.93))
+    MIN_CONF = float(CFG.get("MIN_CONF") or p.get("min_conf") or 0.65)
+    UPSCALE = int(CFG.get("UPSCALE") or p.get("upscale") or 2)
+                        # diukur: 1080p+up2 akurat sama dgn 960+up3, 1.6x lebih cepat
+    MAX_WIDTH = int(CFG.get("MAX_WIDTH") or p.get("max_width") or 1080)
+    BATCH_SIZE = int(CFG.get("BATCH_SIZE") or p.get("batch_size") or 8)
+    MIN_DUR = float(CFG.get("MIN_DUR") or p.get("min_dur") or 0.35)
+    WHISPER_MODEL = CFG.get("WHISPER_MODEL") or p.get("whisper_model") or "small"
+    WHISPER_BEAM = int(CFG.get("WHISPER_BEAM") or p.get("whisper_beam") or 1)
+    BLUR_MODE = CFG.get("BLUR_MODE") or p.get("blur_mode") or "dynamic"
+    BLUR_RADIUS = int(CFG.get("BLUR_RADIUS") or p.get("blur_radius") or 20)
+                        # 12 terlalu lemah: glyph putih di latar gelap masih
+                        # kelihatan sebagai bercak; 20 + power 3 menghilangkannya
+    BLUR_TIME_PAD = float(CFG.get("BLUR_TIME_PAD") or p.get("blur_time_pad") or 0.4)
+                        # dynamic: jendela blur diperlebar ±0.4 detik supaya
+                        # tidak miss kalau timing OCR meleset sedikit
+    ALWAYS_BLUR = bool(CFG.get("ALWAYS_BLUR", p.get("always_blur", True)))
+
+
+# Default bawaan (profil pc) — dipakai kalau profiles.yaml / PyYAML tidak ada.
+PROFILE = CFG.get("profile") or "pc"
+FPS = float(CFG.get("FPS") or 0.5)
 ROI = (0.05, 0.62, 0.95, 0.93)
 MIN_CONF = 0.65
-UPSCALE = 2             # diukur: 1080p+up2 akurat sama dgn 960+up3, 1.6x lebih cepat
-MAX_WIDTH = 1080        # frame lebih lebar dari ini di-resize sebelum crop
-BATCH_SIZE = 8          # frame per panggilan OCR (det per frame, rec satu batch)
-MIN_DUR = 0.35          # segmen lebih pendek dari ini dibuang
-
-# Whisper HANYA untuk timing + cadangan; teks tetap dari OCR. Karena itu
-# model kecil sudah cukup: "small" ~4-6x lebih cepat dari large-v3-turbo
-# di CPU dan timing kata-nya tetap rapat. large-v3-turbo tetap tersedia
-# lewat suba_config.json kalau suatu saat butuh akurasi penuh.
+UPSCALE = 2
+MAX_WIDTH = 1080
+BATCH_SIZE = 8
+MIN_DUR = 0.35
 WHISPER_MODEL = CFG.get("WHISPER_MODEL") or "small"
 WHISPER_BEAM = int(CFG.get("WHISPER_BEAM") or 1)  # 1 = greedy, tercepat
+BLUR_MODE = "dynamic"
+BLUR_RADIUS = 20
+BLUR_TIME_PAD = 0.4
+ALWAYS_BLUR = True
+try:
+    apply_profile(PROFILE)
+except Exception:
+    PROFILE = "pc"  # profil tidak kebaca -> jalan dengan default bawaan
+
 WHISPER_LANG = "zh"
 WHISPER_MAX_SHIFT = 1.5  # detik, batas geser timing OCR ke timing Whisper
 
@@ -95,17 +153,11 @@ WHISPER_MAX_SHIFT = 1.5  # detik, batas geser timing OCR ke timing Whisper
 TEXT_GATE = True
 TEXT_GATE_MIN_BRIGHT = 0.05  # persen pixel sangat terang di ROI
 
-BLUR_RADIUS = 20        # 12 terlalu lemah: glyph putih di latar gelap masih
-                        # kelihatan sebagai bercak; 20 + power 3 menghilangkannya
-BLUR_TIME_PAD = 0.4     # dynamic: jendela blur diperlebar ±0.4 detik supaya
-                        # tidak miss kalau timing OCR meleset sedikit
 BLUR_PAD_X = 0.02
 BLUR_PAD_Y = 0.012
 # static  = satu band vertikal fixed + time-gate (hanya nyala saat ada teks) -> cepat, CPU
 # dynamic = box per segmen, presisi maksimal -> N crop+blur+overlay, butuh GPU/Colab
-BLUR_MODE = "dynamic"
 # True: band blur selalu nyala -> subtitle Mandarin yang tidak terdeteksi OCR tidak bocor
-ALWAYS_BLUR = True
 PROGRESS_PCT = 10       # print progress ffmpeg tiap N persen
 FONT_NAME = "Arial"
 
@@ -348,7 +400,7 @@ def get_engine():
 def fingerprint():
     # roi harus list (bukan tuple) supaya sama setelah JSON round-trip;
     # kalau tuple, resume chunk/episode tidak pernah cocok dan OCR selalu ulang.
-    return {"fps": FPS, "roi": list(ROI), "min_conf": MIN_CONF, "upscale": UPSCALE,
+    return {"profile": PROFILE, "fps": FPS, "roi": list(ROI), "min_conf": MIN_CONF, "upscale": UPSCALE,
             "max_width": MAX_WIDTH, "gate": TEXT_GATE, "gate_min": TEXT_GATE_MIN_BRIGHT}
 
 
@@ -549,6 +601,7 @@ _cpu_model = None  # diisi saat fallback CPU karena libcublas hilang
 
 def _whisper_fingerprint():
     return {
+        "profile": PROFILE,
         "model": WHISPER_MODEL,
         "lang": WHISPER_LANG,
         "vad_filter": False,
@@ -1483,12 +1536,21 @@ def main():
     ap.add_argument("--no-merge", action="store_true", help="lewati merge akhir")
     ap.add_argument("--blur", choices=("static", "dynamic"), default=BLUR_MODE,
                     help="static = 1 band time-gated (CPU); dynamic = box per segmen (GPU/Colab)")
+    ap.add_argument("--profile", default=None,
+                    help="profil per device dari profiles.yaml (pc, vm, instabox, colab, kaggle)")
     args = ap.parse_args()
+
+    if args.profile:
+        try:
+            apply_profile(args.profile)
+        except ValueError as e:
+            print(f"error: {e}")
+            return 2
 
     BLUR_MODE = args.blur
 
     setup_logging()
-    log.info("Suba local start | log=%s | input=%s", LOG_FILE, INPUT_DIR)
+    log.info("Suba local start | profil=%s | log=%s | input=%s", PROFILE, LOG_FILE, INPUT_DIR)
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         log.error("ffmpeg/ffprobe tidak ada di PATH"); return 1
 

@@ -54,7 +54,13 @@ python -m venv .venv
 
 .\.venv\Scripts\python.exe local_pipeline.py --limit 1     # tes 1 episode
 .\.venv\Scripts\python.exe local_pipeline.py               # semua video di input/
+.\.venv\Scripts\python.exe local_pipeline.py --profile vm  # profil lain (pc, vm, instabox)
 ```
+
+Profil per device ada di `profiles.yaml` (colab, kaggle, pc, vm, instabox —
+Termux sengaja tidak ada, tidak direkomendasikan). Notebook: pilih PROFILE di
+cell config, atau generate varian Kaggle dengan
+`python3 notebook/build_colab_nb.py --profile kaggle`.
 
 Env opsional: `TIPROUTER_API_KEY` (fallback LLM), `DEEPL_API_KEY` (translator gratis
 pertama). Tanpa keduanya pipeline tetap jalan lewat Google/MyMemory.

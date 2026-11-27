@@ -27,11 +27,12 @@ Colab, dengan komputasi di GPU remote (Colab T4).
 | D5 | Format output | **SRT saja** (ASS/VTT pasca-MVP) + video hardsub ID |
 | D6 | Terjemahan | Gratis dulu (DeepL → Google → MyMemory), LLM fallback; **tidak ada baris Mandarin yang dibiarkan di SRT ID**. Baris MyMemory/Google di-polish LLM (kalau ada key); kartu nama/peran difilter, tanda kutip pembungkus dibersihkan |
 | D7 | Jalur pipeline | **Jalur 3 (hardsub/OCR + Whisper timing) saja**; Jalur 1 softsub dan Jalur 2 Whisper-only ditunda |
-| D8 | ASR model | `small` (faster-whisper, `compute_type=float16` di GPU / `int8` di CPU), beam 1 (greedy), bahasa `zh` dikunci, VAD mati, temperature 0,0, word timestamp nyala — hanya untuk timing/fusi, bukan transkrip utama. `large-v3-turbo` tetap tersedia lewat config kalau butuh akurasi penuh |
+| D8 | ASR model | Tergantung profil (`profiles.yaml`): GPU (colab/kaggle) `large-v3-turbo` beam 5; CPU (pc/vm/instabox) `small` beam 1 (greedy) — hanya untuk timing/fusi, bukan transkrip utama. Bahasa `zh` dikunci, VAD mati, temperature 0,0, word timestamp nyala |
 | D9 | Chunk | 600 detik, idempoten, resumable |
 | D10 | Privasi | File sumber hanya untuk pemrosesan; tidak untuk training |
 | D11 | Mesin OCR | RapidOCR (bukan PaddleOCR) |
 | D12 | Blur | `static` dan `dynamic` tetap tersedia sebagai opsi; default `dynamic` (radius 20, power 3, jendela ±0,4 detik) sejak 2026-11-27 — band statis meninggalkan bayangan glyph di latar gelap dan mengaburkan wajah di area tanpa teks |
+| D13 | Profil per device | Satu kode, setting per device di `profiles.yaml` (colab, kaggle, pc, vm, instabox — Termux sengaja tidak ada, tidak direkomendasikan). Notebook: pilih PROFILE di cell config, atau `build_colab_nb.py --profile kaggle` (Colab 24 cell, Kaggle 23 cell). Lokal: `local_pipeline.py --profile pc`. Ganti profil = fingerprint berubah = cache/checkpoint lama tidak dipakai |
 
 ## 3. Ruang lingkup MVP
 
@@ -106,13 +107,13 @@ Tujuan cell ini hanya satu: **timing yang pas dan tidak miss timing**.
 OCR 0.5 fps memberi timing ±2 detik dan bisa melewatkan baris pendek. Whisper
 memberi timing kata yang jauh lebih rapat.
 
-- Model: faster-whisper `small`, `compute_type=float16` (GPU) / `int8` (CPU),
-  bahasa `zh` dikunci. `large-v3-turbo` tetap tersedia lewat config kalau
-  butuh akurasi penuh.
+- Model: tergantung profil — GPU (colab/kaggle) faster-whisper
+  `large-v3-turbo` beam 5; CPU (pc/vm/instabox) `small` beam 1 (greedy),
+  bahasa `zh` dikunci. Whisper hanya untuk timing, jadi model kecil sudah
+  cukup di CPU — ~4-6x lebih cepat dari large-v3-turbo.
 - Setting yang dipakai (metode cepat 2026-11-27): `vad_filter=False`,
-  `condition_on_previous_text=False`, `temperature=0.0`, `beam_size=1`
-  (greedy), `word_timestamps=True`. Whisper hanya untuk timing, jadi model
-  kecil sudah cukup — ~4-6x lebih cepat dari large-v3-turbo di CPU.
+  `condition_on_previous_text=False`, `temperature=0.0`, `beam_size`
+  sesuai profil (1 CPU / 5 GPU), `word_timestamps=True`.
 - OCR + Whisper jalan paralel di pipeline lokal (ThreadPoolExecutor); di
   Colab cell tetap berurutan karena Whisper GPU sudah cepat.
 - Audio diekstrak mono 16 kHz, diproses per chunk 600 detik yang sama dengan OCR,

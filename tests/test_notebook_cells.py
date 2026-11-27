@@ -1,5 +1,6 @@
 ﻿"""Smoke test notebook cells (config -> OCR defs -> translate -> render) di folder temp."""
 import json, os, subprocess, sys, tempfile
+import yaml
 from PIL import Image
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -16,6 +17,20 @@ cfg = cfg.replace('EPISODES_DIR = "/content/drive/MyDrive/duanju/episodes"',
                   f'EPISODES_DIR = r"{eps}"')
 cfg = cfg.replace('BASE_OUT_DIR = "/content/drive/MyDrive/duanju/suba_hardsub"',
                   f'BASE_OUT_DIR = r"{out}"')
+# Profil: jalankan cell config dengan profil pc (nilai yang dipakai tes
+# Whisper small / FPS 0.5), dengan dir episode/output diarahkan ke temp.
+_raw = yaml.safe_load(open(os.path.join(BASE, "profiles.yaml"), encoding="utf-8"))
+_defs = _raw.get("defaults") or {}
+_profiles = {}
+for _n, _p in (_raw.get("profiles") or {}).items():
+    _m = dict(_defs)
+    _m.update(_p or {})
+    _profiles[_n] = _m
+_profiles["pc"]["episodes_dir"] = eps
+_profiles["pc"]["base_out_dir"] = out
+cfg = cfg.replace('PROFILE = "colab"  # __PROFILE_NAME__', 'PROFILE = "pc"')
+cfg = cfg.replace("PROFILES = {}  # __PROFILES_JSON__",
+                  "PROFILES = " + repr(_profiles))
 
 g = {"__name__": "__main__"}
 exec(compile(cfg, "config", "exec"), g)
@@ -196,3 +211,30 @@ _fp = g["fingerprint"]()
 assert _json.loads(_json.dumps(_fp)) == _fp, _fp
 assert isinstance(_fp["roi"], list), _fp
 print("CELL FINGERPRINT ROUNDTRIP OK")
+
+# Profil di notebook (2026-11-27): generator menyuntik PROFILES + PROFILE
+# ke cell config; varian kaggle tanpa mount Drive.
+import subprocess as _sp
+for _prof, _out in (("colab", "colab-suba-hardsub-v2.ipynb"),
+                    ("kaggle", "kaggle-suba-hardsub-v2.ipynb")):
+    _r = _sp.run([sys.executable, "notebook/build_colab_nb.py", "--profile", _prof],
+                 capture_output=True, text=True, cwd=BASE)
+    assert _r.returncode == 0, _r.stderr
+    _nb = json.load(open(os.path.join(BASE, "notebook", _out), encoding="utf-8"))
+    # colab 24 cell; kaggle 23 (langkah mount Drive jadi 1 cell markdown).
+    assert len(_nb["cells"]) == (24 if _prof == "colab" else 23), len(_nb["cells"])
+    _srcs = ["".join(c.get("source", [])) for c in _nb["cells"]]
+    _cfg_src = next(s for s in _srcs if "PROFILES" in s and "EPISODES_DIR" in s)
+    _g2 = {"__name__": "__main__"}
+    exec(compile(_cfg_src, "config-" + _prof, "exec"), _g2)
+    assert set(_g2["PROFILES"]) == {"colab", "kaggle", "pc", "vm", "instabox"}
+    assert "termux" not in _g2["PROFILES"]
+    assert _g2["PROFILE"] == _prof
+    assert any("drive.mount" in s for s in _srcs) == (_prof == "colab"), _prof
+    if _prof == "kaggle":
+        assert _g2["EPISODES_DIR"].startswith("/kaggle/input/"), _g2["EPISODES_DIR"]
+        assert _g2["BASE_OUT_DIR"].startswith("/kaggle/working/"), _g2["BASE_OUT_DIR"]
+        assert _g2["FPS"] == 1.0 and _g2["WHISPER_MODEL"] == "large-v3-turbo"
+    else:
+        assert _g2["EPISODES_DIR"].startswith("/content/drive/"), _g2["EPISODES_DIR"]
+print("CELL PROFILE OK")

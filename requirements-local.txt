@@ -2,6 +2,7 @@ onnxruntime
 numpy
 opencv-python
 pillow
+pyyaml
 rapidocr-onnxruntime==1.2.3
 faster-whisper==1.2.1
 deep-translator

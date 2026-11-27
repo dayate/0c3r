@@ -47,7 +47,9 @@ def get_engine():
 def fingerprint():
     # roi harus list (bukan tuple) supaya sama setelah JSON round-trip;
     # kalau tuple, resume chunk/episode tidak pernah cocok dan OCR selalu ulang.
-    return {"fps": FPS, "roi": list(ROI), "min_conf": MIN_CONF, "upscale": UPSCALE,
+    # profile ikut: ganti profil = setting beda = cache lama tidak dipakai.
+    return {"profile": globals().get("PROFILE", "colab"),
+            "fps": FPS, "roi": list(ROI), "min_conf": MIN_CONF, "upscale": UPSCALE,
             "max_width": MAX_WIDTH, "gate": TEXT_GATE, "gate_min": TEXT_GATE_MIN_BRIGHT}
 
 

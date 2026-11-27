@@ -1,0 +1,94 @@
+# Suba — profil per device (2026-11-27).
+# Satu kode, setting per device. Jangan fork pipeline per device: logika
+# dobel itu yang bikin lokal vs notebook kemarin gampang drift.
+#
+# Cara pakai:
+#   - Notebook Colab/Kaggle: pilih PROFILE di cell konfigurasi, atau
+#     generate notebook-nya dengan: python3 notebook/build_colab_nb.py --profile kaggle
+#   - Lokal: python local_pipeline.py --profile pc   (default: pc)
+#   - suba_config.json tetap bisa menimpa nilai profil (tulis key yang sama).
+#
+# Urutan menang: defaults di bawah <- profil <- suba_config.json.
+# Nilai yang tidak ditulis di profil diambil dari defaults.
+# Ganti profil = fingerprint berubah = cache/checkpoint lama tidak dipakai
+# (benar: setting beda, hasil lama tidak boleh dipakai ulang).
+#
+# Termux SENGAJA tidak ada di sini: CPU HP (Helio G88, 2 core A75) terlalu
+# lambat buat pipeline ini (episode 158 dtk ~20-35 menit, video 170 menit
+# puluhan jam) dan rawan OOM di varian RAM 4 GB. Kalau tetap mau coba,
+# pakai profil pc di proot Ubuntu — tapi tidak direkomendasikan.
+
+defaults:
+  platform: local
+  mount_drive: false      # true: cell mount Google Drive (hanya colab)
+  install_cublas: false   # true: pip install nvidia-cublas/cudnn (hanya colab)
+  max_width: 1080
+  batch_size: 8
+  min_dur: 0.35
+  blur_mode: dynamic
+  blur_radius: 20
+  blur_time_pad: 0.4
+  always_blur: true
+
+profiles:
+  colab:
+    platform: colab
+    note: "Gratis, T4 GPU, 2 vCPU, ~13 GB RAM. Jalur utama."
+    mount_drive: true
+    install_cublas: true
+    episodes_dir: /content/drive/MyDrive/duanju/episodes
+    base_out_dir: /content/drive/MyDrive/duanju/suba_hardsub
+    fps: 1.0
+    roi: [0.05, 0.55, 0.95, 0.93]
+    min_conf: 0.55
+    upscale: 3
+    whisper_model: large-v3-turbo
+    whisper_beam: 5
+
+  kaggle:
+    platform: kaggle
+    note: "Gratis, T4x2 GPU, 4 CPU, ~29 GB RAM. 30 GPU-jam/minggu, output maks ~20 GB."
+    episodes_dir: /kaggle/input/duanju-episodes
+    base_out_dir: /kaggle/working/suba_hardsub
+    fps: 1.0
+    roi: [0.05, 0.55, 0.95, 0.93]
+    min_conf: 0.55
+    upscale: 3
+    whisper_model: large-v3-turbo
+    whisper_beam: 5
+
+  pc:
+    platform: local
+    note: "PC Taufik (i5-3550, tanpa GPU). OCR 0,5 fps + Whisper small, jalan paralel."
+    episodes_dir: input
+    base_out_dir: output
+    fps: 0.5
+    roi: [0.05, 0.62, 0.95, 0.93]
+    min_conf: 0.65
+    upscale: 2
+    whisper_model: small
+    whisper_beam: 1
+
+  vm:
+    platform: local
+    note: "Testing di VM Muse (CPU throttle, 1,5 vCPU). BUKAN buat produksi."
+    episodes_dir: input
+    base_out_dir: output
+    fps: 0.5
+    roi: [0.05, 0.62, 0.95, 0.93]
+    min_conf: 0.65
+    upscale: 2
+    whisper_model: small
+    whisper_beam: 1
+
+  instabox:
+    platform: local
+    note: "InstaBox free (4 vCPU / 8 GB, 20 GB disk). CPU-only, maks 8 jam per run."
+    episodes_dir: input
+    base_out_dir: output
+    fps: 0.5
+    roi: [0.05, 0.62, 0.95, 0.93]
+    min_conf: 0.65
+    upscale: 2
+    whisper_model: small
+    whisper_beam: 1
