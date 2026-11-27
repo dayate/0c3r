@@ -1,5 +1,6 @@
 ﻿"""Smoke test notebook cells (config -> OCR defs -> translate -> render) di folder temp."""
 import json, os, subprocess, sys, tempfile
+from PIL import Image
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -59,6 +60,25 @@ _arr = g["_load_wav_array"](_wav)
 assert _arr.dtype.name == "float32" and _arr.shape == (16000,), _arr.shape
 assert abs(float(_arr[0]) - 1000 / 32768.0) < 1e-6
 print("CELL WHISPER WAV OK")
+
+# Tuning cell: tanpa ipywidgets di VM, UI dilewati tapi fungsi tetap terdefinisi
+_exec_ep = g["EPISODES_DIR"]
+exec(compile(open(os.path.join(SRC, "nb_new_tune.py"), encoding="utf-8").read(), "tune", "exec"), g)
+g["EPISODES_DIR"] = _exec_ep
+assert callable(g["_prepare_crop"]) and callable(g["_ocr_frame"]) and callable(g["_draw_result"])
+_timg = Image.new("RGB", (540, 960), (20, 20, 20))
+_tarr, _w, _h, _cw, _ch = g["_prepare_crop"](_timg, (0.05, 0.62, 0.95, 0.93), 2, 1080)
+assert _tarr.shape == (594, 972, 3), _tarr.shape
+class _FakeEngine:
+    def __call__(self, a):
+        return [([[0, 0], [100, 0], [100, 20], [0, 20]], "你好世界", 0.92),
+                ([[0, 30], [80, 30], [80, 50], [0, 50]], "再见", 0.40)], 0.1
+_det = g["_ocr_frame"](_FakeEngine(), _tarr, 0.65)
+assert len(_det) == 1 and _det[0][0] == "你好世界", _det
+_drawn = g["_draw_result"](_timg, (0.05, 0.62, 0.95, 0.93), _det, 2, _cw, _ch,
+                           os.path.join(td, "tune_res.png"))
+assert _drawn and os.path.getsize(_drawn) > 1000
+print("CELL TUNE OK")
 
 g["MAX_EPISODES"] = 200
 ep_json = os.path.join(out, "per_episode", stem + "_ocr.json")

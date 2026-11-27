@@ -28,6 +28,8 @@ cells = [
     c(code("nb_new_config.py")),
     c("## 3b — Validator SRT"),
     c(code("nb_new_validate.py")),
+    c("## 3c — Tuning OCR (GUI, jalankan sebelum OCR)"),
+    c(code("nb_new_tune.py")),
     c(code("nb_new_md7.md"), "md"),
     c("## 4 — OCR (Mandarin)"),
     c(code("nb_new_ocr.py")),
