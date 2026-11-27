@@ -1,0 +1,27 @@
+﻿# Python virtual environment
+.venv/
+
+# Python bytecode cache
+__pycache__/
+
+# Output artifacts (generated subtitle/hardsub files)
+output/
+work/
+
+# Test files and notebooks (kept for reference but not source)
+test/
+*.ipynb
+
+# Large media files (video input/output)
+*.mp4
+
+# Log files
+log.txt
+
+# Jupyter cache
+.ipynb_checkpoints/
+
+# OS temporary files
+Thumbs.db
+ehthumbs.db
+Desktop.ini

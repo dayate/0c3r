@@ -1,0 +1,37 @@
+{
+  "DEFAULT_COMPUTE": "auto",
+  "MAX_VIDEO_DURATION": null,
+  "MAX_CHUNK_DURATION": 600,
+  "SUPPORTED_LANGUAGES": {
+    "source": [
+      "en",
+      "ko",
+      "zh"
+    ],
+    "target": [
+      "id"
+    ],
+    "subtitles": [
+      "ko",
+      "en",
+      "zh"
+    ]
+  },
+  "CHUNK_SECONDS": 600,
+  "WHISPER_MODEL_NAME": "large-v3-turbo",
+  "WHISPER_MODEL_SIZE": "large",
+  "STORAGE_LAYOUT": {
+    "base": "suba_workspace",
+    "source": "source",
+    "chunks": "chunks",
+    "final": "final",
+    "cache": "cache",
+    "models": "cache/models"
+  },
+  "DEFAULT_GLOSSARY": {
+    "names": {},
+    "terms": {},
+    "honorifics": {}
+  },
+  "BASE_DIR": "D:\\01_Development\\01_Workspace\\_AI_Dev\\HERMES\\Suba\\suba"
+}

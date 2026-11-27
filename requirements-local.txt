@@ -1,0 +1,6 @@
+onnxruntime
+numpy
+opencv-python
+pillow
+rapidocr-onnxruntime==1.2.3
+deep-translator
