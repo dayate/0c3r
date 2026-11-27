@@ -76,3 +76,20 @@ assert lp.validate_segments(bad_overlap), "validator harus menolak overlap"
 bad_mandarin = [{"start": 0.5, "end": 1.5, "text_zh": "你好", "text_id": "你好"}]
 assert lp.validate_segments(bad_mandarin), "validator harus menolak Mandarin di SRT ID"
 print("VALIDATOR OK")
+
+# Normalisasi: kasus nyata dari Colab 2026-11-27 — overlap dari fusi Whisper,
+# durasi 0.35s, dan baris ID 44/46 karakter. Sebelum normalisasi validator
+# menolak, sesudahnya harus lolos.
+bad = [
+    {"start": 2.0, "end": 4.42, "text_zh": "你好吗", "text_id": "Apa kabar kamu hari ini"},
+    {"start": 3.64, "end": 5.1, "text_zh": "很好", "text_id": "Aku baik-baik saja, terima kasih"},
+    {"start": 4.84, "end": 5.19, "text_zh": "谢谢", "text_id": "Terima kasih banyak ya"},
+    {"start": 6.0, "end": 6.35, "text_zh": "再见", "text_id": "Sampai jumpa lagi nanti ya"},
+    {"start": 10.0, "end": 12.0, "text_zh": "我想去看看那个地方", "text_id": "Aku ingin pergi melihat tempat itu besok pagi"},
+]
+assert lp.validate_segments(bad), "kasus nyata harus ditolak sebelum normalisasi"
+fixed, nstats = lp.normalize_segments(bad)
+assert lp.validate_segments(fixed) == [], lp.validate_segments(fixed)
+assert all(len(l) <= 42 for s in fixed for l in (s["text_id"] or "").split("\n"))
+assert nstats["trimmed"] >= 2 and nstats["wrapped"] >= 1, nstats
+print("NORMALIZE OK", nstats)

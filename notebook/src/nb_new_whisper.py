@@ -360,6 +360,15 @@ for i, vid_path in enumerate(videos, 1):
     whisper_segs.sort(key=lambda x: float(x["start"]))
 
     fused, stats = fuse_segments(ocr_segs, whisper_segs)
+    # Fusi bisa menimbulkan overlap (timing OCR digeser ke timing kata
+    # Whisper + segmen Whisper-only disisipkan). Rapikan di sini kalau
+    # validator sudah jalan di sesi ini; cell Translate tetap menormalisasi
+    # lagi sebelum menulis SRT ID, jadi ini bukan satu-satunya pengaman.
+    if "normalize_segments" in globals():
+        fused, _nstats = normalize_segments(fused)
+        print(f"[whisper] {i}/{len(videos)} {stem}: normalisasi "
+              f"dipotong={_nstats['trimmed']} dibuang={_nstats['dropped']} "
+              f"dibungkus={_nstats['wrapped']} dipecah={_nstats['split']}", flush=True)
     payload["segments"] = fused
     payload["whisper_applied"] = True
     payload["whisper_fingerprint"] = fp

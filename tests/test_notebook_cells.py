@@ -113,7 +113,16 @@ exec(compile(open(os.path.join(SRC, "nb_new_translate.py"), encoding="utf-8").re
 assert callable(g2["assert_valid_segments"])
 assert g2["validate_segments"]([{"start": 0.5, "end": 1.5, "text_zh": "你好", "text_id": "你好"}]), \
     "validator cadangan harus menolak Mandarin di SRT ID"
-print("CELL TRANSLATE VALIDATOR FALLBACK OK")
+_bad = [
+    {"start": 2.0, "end": 4.42, "text_zh": "你好吗", "text_id": "Apa kabar kamu hari ini"},
+    {"start": 3.64, "end": 5.1, "text_zh": "很好", "text_id": "Aku baik-baik saja, terima kasih"},
+    {"start": 10.0, "end": 12.0, "text_zh": "我想去看看那个地方", "text_id": "Aku ingin pergi melihat tempat itu besok pagi"},
+]
+assert g2["validate_segments"](_bad), "kasus nyata harus ditolak sebelum normalisasi"
+_fixed, _ns = g2["normalize_segments"](_bad)
+assert g2["validate_segments"](_fixed) == [], g2["validate_segments"](_fixed)
+assert all(len(l) <= 42 for s in _fixed for l in (s["text_id"] or "").split("\n"))
+print("CELL TRANSLATE NORMALIZE OK", _ns)
 
 g["MAX_EPISODES"] = 200
 ep_json = os.path.join(out, "per_episode", stem + "_ocr.json")

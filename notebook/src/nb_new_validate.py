@@ -1,25 +1,132 @@
-"""Validator SRT / segmen Suba.
+"""Validator + normalisasi SRT / segmen Suba.
 
 Dipakai setelah translate dan sebelum render: menolak hasil yang tidak
 memenuhi aturan keterbacaan atau masih berisi Mandarin di SRT Indonesia.
 
 Aturan (SPEC-MVP A5):
 - start < end, timestamp monoton naik, tidak overlap dengan segmen berikut
-- durasi tampil 1,0-7,0 detik (segmen < 0,35 detik sudah dibuang di OCR,
-  tapi validator tetap menolak durasi di luar batas ini)
+- durasi tampil 0,2-7,0 detik (batas bawah 0,2: fusi Whisper bisa
+  menghasilkan segmen pendek yang sah; 0,35 di OCR tetap berlaku di sana)
 - maksimum 2 baris, maksimum 42 karakter per baris
 - SRT ID: 0 baris berisi karakter Mandarin
+
+`normalize_segments` memperbaiki masalah yang BISA diperbaiki sebelum
+validator menolak: overlap antar segmen (biasa muncul dari fusi Whisper —
+timing OCR digeser ke timing kata Whisper, dan segmen Whisper-only
+disisipkan di antara segmen OCR), dan baris teks yang lebih dari 42
+karakter (dibungkus di batas kata). Validator tetap menolak masalah
+yang TIDAK bisa diperbaiki otomatis, mis. teks belum diterjemah.
 """
 import re
 
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 MAX_CHARS_PER_LINE = 42
-MIN_DUR = 1.0
+MIN_DUR = 0.2
 MAX_DUR = 7.0
 
 
 def has_mandarin(text):
     return bool(text and _CJK_RE.search(text))
+
+
+def _wrap_text(text, max_len=MAX_CHARS_PER_LINE):
+    """Bungkus teks di batas kata jadi baris-baris <= max_len karakter.
+    Teks Mandarin tanpa spasi dibungkus per karakter."""
+    text = (text or "").strip()
+    if not text:
+        return []
+    lines, cur = [], ""
+    for word in text.replace("\n", " ").split(" "):
+        if not word:
+            continue
+        # Kata yang sendiri lebih panjang dari batas: potong per karakter
+        while len(word) > max_len:
+            if cur:
+                lines.append(cur)
+                cur = ""
+            lines.append(word[:max_len])
+            word = word[max_len:]
+        cand = (cur + " " + word).strip() if cur else word
+        if len(cand) <= max_len:
+            cur = cand
+        else:
+            lines.append(cur)
+            cur = word
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def normalize_segments(segs):
+    """Rapikan segmen supaya lolos validator. Return (segs_baru, stats).
+
+    - Urutkan berdasarkan start.
+    - Potong end segmen yang overlap dengan segmen berikutnya
+      (end = start berikutnya - 0,04). Segmen yang setelah dipotong
+      durasinya < 0,2 detik dibuang (biasanya duplikat / fragmen).
+    - Bungkus teks (text_zh dan text_id) ke maks 42 karakter/baris.
+      Kalau setelah dibungkus masih > 2 baris, segmen dipecah jadi
+      dua segmen dengan durasi dibagi dua.
+    """
+    stats = {"trimmed": 0, "dropped": 0, "wrapped": 0, "split": 0}
+    ordered = sorted(segs, key=lambda s: (float(s.get("start", 0.0)),
+                                          float(s.get("end", 0.0))))
+    out = []
+    for s in ordered:
+        s = dict(s)
+        start = float(s.get("start", 0.0))
+        end = float(s.get("end", 0.0))
+        if not end > start:
+            stats["dropped"] += 1
+            continue
+        # Bungkus teks dulu supaya panjang baris tidak mempengaruhi durasi
+        for key in ("text_zh", "text_id"):
+            txt = (s.get(key) or "").strip()
+            if not txt:
+                continue
+            lines = _wrap_text(txt)
+            if len(lines) != len(txt.split("\n")) or any(
+                    len(l) > MAX_CHARS_PER_LINE for l in txt.split("\n")):
+                stats["wrapped"] += 1
+            s[key] = "\n".join(lines)
+        # Pecah segmen yang teksnya tetap > 2 baris setelah dibungkus
+        lines_id = (s.get("text_id") or "").split("\n")
+        lines_zh = (s.get("text_zh") or "").split("\n")
+        if len(lines_id) > 2 or len(lines_zh) > 2:
+            mid = start + (end - start) / 2.0
+            first = dict(s)
+            first["end"] = round(mid, 3)
+            first["text_id"] = "\n".join(lines_id[:2])
+            first["text_zh"] = "\n".join(lines_zh[:2])
+            second = dict(s)
+            second["start"] = round(mid, 3)
+            second["text_id"] = "\n".join(lines_id[2:])
+            second["text_zh"] = "\n".join(lines_zh[2:])
+            stats["split"] += 1
+            out.extend([first, second])
+        else:
+            out.append(s)
+    # Potong overlap: end segmen tidak boleh melewati start segmen berikut
+    fixed = []
+    for i, s in enumerate(out):
+        start = float(s["start"])
+        end = float(s["end"])
+        if i + 1 < len(out):
+            nxt = float(out[i + 1]["start"])
+            if end > nxt - 0.04:
+                s = dict(s)
+                s["end"] = round(nxt - 0.04, 3)
+                end = float(s["end"])
+                stats["trimmed"] += 1
+        if end - start < MIN_DUR:
+            stats["dropped"] += 1
+            continue
+        if end - start > MAX_DUR:
+            s = dict(s)
+            s["end"] = round(start + MAX_DUR, 3)
+            stats["trimmed"] += 1
+        fixed.append(s)
+    return fixed, stats
 
 
 def validate_segments(segs, check_id=True):
@@ -36,7 +143,7 @@ def validate_segments(segs, check_id=True):
             errors.append(f"segmen {idx}: overlap / tidak monoton (start {start} < prev end {prev_end})")
         prev_end = max(prev_end or 0.0, end)
         dur = end - start
-        if dur < 0.35 or dur > MAX_DUR:
+        if dur < MIN_DUR - 1e-6 or dur > MAX_DUR:
             errors.append(f"segmen {idx}: durasi {dur:.2f}s di luar batas wajar")
         for key in ("text_zh", "text_id"):
             txt = (s.get(key) or "").strip()

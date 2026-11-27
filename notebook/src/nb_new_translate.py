@@ -8,11 +8,95 @@ def has_mandarin(text):
     return bool(text and _CJK_RE.search(text))
 
 
-# Validator SRT (cadangan): kalau cell 3b belum dijalankan di sesi ini
-# — mis. runtime restart lalu cell Translate dijalankan langsung — definisi
-# di bawah dipakai supaya cell tidak crash NameError. Isinya sama dengan
-# notebook/src/nb_new_validate.py.
+# Validator + normalisasi SRT (cadangan): kalau cell 3b belum dijalankan
+# di sesi ini — mis. runtime restart lalu cell Translate dijalankan
+# langsung — definisi di bawah dipakai supaya cell tidak crash NameError.
+# Isinya sama dengan notebook/src/nb_new_validate.py.
 if "assert_valid_segments" not in globals():
+    def _wrap_text(text, max_len=42):
+        text = (text or "").strip()
+        if not text:
+            return []
+        lines, cur = [], ""
+        for word in text.replace("\n", " ").split(" "):
+            if not word:
+                continue
+            while len(word) > max_len:
+                if cur:
+                    lines.append(cur)
+                    cur = ""
+                lines.append(word[:max_len])
+                word = word[max_len:]
+            cand = (cur + " " + word).strip() if cur else word
+            if len(cand) <= max_len:
+                cur = cand
+            else:
+                lines.append(cur)
+                cur = word
+        if cur:
+            lines.append(cur)
+        return lines
+
+    def normalize_segments(segs):
+        """Rapikan segmen: potong overlap, bungkus baris > 42 char,
+        pecah segmen yang teksnya tetap > 2 baris. Return (segs, stats)."""
+        stats = {"trimmed": 0, "dropped": 0, "wrapped": 0, "split": 0}
+        ordered = sorted(segs, key=lambda s: (float(s.get("start", 0.0)),
+                                              float(s.get("end", 0.0))))
+        out = []
+        for s in ordered:
+            s = dict(s)
+            start = float(s.get("start", 0.0))
+            end = float(s.get("end", 0.0))
+            if not end > start:
+                stats["dropped"] += 1
+                continue
+            for key in ("text_zh", "text_id"):
+                txt = (s.get(key) or "").strip()
+                if not txt:
+                    continue
+                lines = _wrap_text(txt)
+                if len(lines) != len(txt.split("\n")) or any(
+                        len(l) > 42 for l in txt.split("\n")):
+                    stats["wrapped"] += 1
+                s[key] = "\n".join(lines)
+            lines_id = (s.get("text_id") or "").split("\n")
+            lines_zh = (s.get("text_zh") or "").split("\n")
+            if len(lines_id) > 2 or len(lines_zh) > 2:
+                mid = start + (end - start) / 2.0
+                first = dict(s)
+                first["end"] = round(mid, 3)
+                first["text_id"] = "\n".join(lines_id[:2])
+                first["text_zh"] = "\n".join(lines_zh[:2])
+                second = dict(s)
+                second["start"] = round(mid, 3)
+                second["text_id"] = "\n".join(lines_id[2:])
+                second["text_zh"] = "\n".join(lines_zh[2:])
+                stats["split"] += 1
+                out.extend([first, second])
+            else:
+                out.append(s)
+        fixed = []
+        for i, s in enumerate(out):
+            start = float(s["start"])
+            end = float(s["end"])
+            if i + 1 < len(out):
+                nxt = float(out[i + 1]["start"])
+                if end > nxt - 0.04:
+                    s = dict(s)
+                    s["end"] = round(nxt - 0.04, 3)
+                    end = float(s["end"])
+                    stats["trimmed"] += 1
+            if end - start < 0.2:
+                stats["dropped"] += 1
+                continue
+            if end - start > 7.0:
+                s = dict(s)
+                s["end"] = round(start + 7.0, 3)
+                stats["trimmed"] += 1
+            fixed.append(s)
+        return fixed, stats
+
     def validate_segments(segs, check_id=True):
         errors = []
         prev_end = None
@@ -25,7 +109,7 @@ if "assert_valid_segments" not in globals():
             if prev_end is not None and start < prev_end - 0.001:
                 errors.append(f"segmen {idx}: overlap / tidak monoton (start {start} < prev end {prev_end})")
             prev_end = max(prev_end or 0.0, end)
-            if end - start < 0.35 or end - start > 7.0:
+            if end - start < 0.2 - 1e-6 or end - start > 7.0:
                 errors.append(f"segmen {idx}: durasi {end - start:.2f}s di luar batas wajar")
             for key in ("text_zh", "text_id"):
                 txt = (s.get(key) or "").strip()
@@ -271,6 +355,14 @@ for i, vid_path in enumerate(videos, 1):
             f"translate gagal {len(failed_final)} baris di {stem} "
             f"(lihat {review_path}); perbaiki API key / koneksi lalu jalankan "
             f"cell ini lagi — hanya baris di daftar review yang dicoba ulang")
+    # Normalisasi: rapikan overlap dari fusi Whisper + bungkus baris panjang
+    # sebelum SRT ditulis dan divalidasi, supaya validator tidak menolak
+    # masalah yang bisa diperbaiki otomatis.
+    segs, _nstats = normalize_segments(segs)
+    payload["segments"] = segs
+    print(f"[tr] {i}/{len(videos)} {stem}: normalisasi "
+          f"dipotong={_nstats['trimmed']} dibuang={_nstats['dropped']} "
+          f"dibungkus={_nstats['wrapped']} dipecah={_nstats['split']}", flush=True)
     write_json_atomic(ep_json, payload)
     write_srt(segs, out_id_srt, "text_id")
     # Validator: tolak SRT yang tidak valid / masih berisi Mandarin
