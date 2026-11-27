@@ -80,6 +80,41 @@ _drawn = g["_draw_result"](_timg, (0.05, 0.62, 0.95, 0.93), _det, 2, _cw, _ch,
 assert _drawn and os.path.getsize(_drawn) > 1000
 print("CELL TUNE OK")
 
+# Whisper fallback: model GPU gagal libcublas -> ganti CPU, chunk tetap jadi
+import wave as _wave2, struct as _struct2
+_fwav = os.path.join(td, "fallback.wav")
+with _wave2.open(_fwav, "wb") as _wf:
+    _wf.setnchannels(1); _wf.setsampwidth(2); _wf.setframerate(16000)
+    _wf.writeframes(_struct2.pack("<16000h", *([1000] * 16000)))
+class _GpuModel:
+    def transcribe(self, audio, **kw):
+        raise RuntimeError("Library libcublas.so.12 is not found or cannot be loaded")
+class _CpuModel:
+    def transcribe(self, audio, **kw):
+        class _W:
+            def __init__(self): self.start, self.end, self.word = 0.0, 1.0, "你"
+        class _S:
+            def __init__(self):
+                self.start, self.end, self.text = 0.0, 1.0, "你好"
+                self.words = [_W()]
+                self.avg_logprob = -0.1
+        return [_S()], {}
+g["_get_model"] = lambda force_cpu=False: _CpuModel()
+_got = g["_transcribe_chunk"](_GpuModel(), _fwav, 0.0, 1.0)
+assert len(_got) == 1 and _got[0]["text"] == "你好", _got
+assert g["_cpu_model"] is not None
+print("CELL WHISPER CUBLAS FALLBACK OK")
+
+# Validator cadangan: cell Translate jalan tanpa cell 3b tetap punya validator
+g2 = dict(g)
+g2.pop("validate_segments", None)
+g2.pop("assert_valid_segments", None)
+exec(compile(open(os.path.join(SRC, "nb_new_translate.py"), encoding="utf-8").read(), "translate2", "exec"), g2)
+assert callable(g2["assert_valid_segments"])
+assert g2["validate_segments"]([{"start": 0.5, "end": 1.5, "text_zh": "你好", "text_id": "你好"}]), \
+    "validator cadangan harus menolak Mandarin di SRT ID"
+print("CELL TRANSLATE VALIDATOR FALLBACK OK")
+
 g["MAX_EPISODES"] = 200
 ep_json = os.path.join(out, "per_episode", stem + "_ocr.json")
 segs = [

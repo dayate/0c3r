@@ -103,8 +103,41 @@ def _extract_audio(vid_path, wav_path):
     return wav_path
 
 
-def _get_model():
+_cpu_model = None  # diisi saat fallback CPU karena libcublas hilang
+
+
+def _preload_cublas():
+    """Preload libcublas.so.12 dari paket nvidia-cublas-cu12 (kalau ada).
+
+    Di Colab, faster-whisper/ctranslate2 butuh libcublas.so.12 saat encode
+    di GPU, tapi library itu tidak selalu ada di image Colab. Kalau tidak
+    di-preload, encode gagal: "Library libcublas.so.12 is not found".
+    """
+    try:
+        import ctypes
+        import glob as _glob
+        import sysconfig
+        base = sysconfig.get_paths().get("purelib", "")
+        for pat in (os.path.join(base, "nvidia", "cublas", "lib", "libcublas.so.12"),
+                    os.path.join(base, "nvidia", "cudnn", "lib", "libcudnn.so.9"),
+                    "/usr/local/cuda/lib64/libcublas.so.12"):
+            for path in _glob.glob(pat):
+                try:
+                    ctypes.CDLL(path)
+                    return True
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return False
+
+
+def _get_model(force_cpu=False):
+    _preload_cublas()
     from faster_whisper import WhisperModel
+    if force_cpu:
+        print("  [whisper] pakai CPU int8 (fallback libcublas)", flush=True)
+        return WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
     try:
         import torch
         has_cuda = bool(torch.cuda.is_available())
@@ -143,7 +176,15 @@ def _load_wav_array(path):
 
 
 def _transcribe_chunk(model, wav_path, start, dur):
-    """Transkrip satu chunk audio, timestamp di-offset ke waktu video."""
+    """Transkrip satu chunk audio, timestamp di-offset ke waktu video.
+
+    Kalau encode GPU gagal karena libcublas.so.12 tidak ditemukan,
+    otomatis ganti ke model CPU int8 dan coba sekali lagi — cell tidak
+    crash, cuma lebih lambat. Model CPU dipakai untuk chunk berikutnya.
+    """
+    global _cpu_model
+    if _cpu_model is not None:
+        model = _cpu_model
     tmp = wav_path + f".chunk{int(start)}.wav"
     subprocess.run(
         ["ffmpeg", "-y", "-v", "error", "-ss", f"{start:.3f}", "-t", f"{dur:.3f}",
@@ -151,10 +192,21 @@ def _transcribe_chunk(model, wav_path, start, dur):
         check=True, capture_output=True)
     try:
         audio = _load_wav_array(tmp)
-        segments, _info = model.transcribe(
-            audio, language=WHISPER_LANG, vad_filter=False,
-            condition_on_previous_text=False, temperature=0.0,
-            beam_size=5, word_timestamps=True)
+        try:
+            segments, _info = model.transcribe(
+                audio, language=WHISPER_LANG, vad_filter=False,
+                condition_on_previous_text=False, temperature=0.0,
+                beam_size=5, word_timestamps=True)
+        except RuntimeError as e:
+            if "cublas" not in str(e).lower() and "libcublas" not in str(e).lower():
+                raise
+            print("  [whisper] libcublas.so.12 tidak ditemukan di GPU, "
+                  "fallback ke CPU int8 (lebih lambat, tapi jalan)", flush=True)
+            _cpu_model = _get_model(force_cpu=True)
+            segments, _info = _cpu_model.transcribe(
+                audio, language=WHISPER_LANG, vad_filter=False,
+                condition_on_previous_text=False, temperature=0.0,
+                beam_size=5, word_timestamps=True)
         out = []
         for seg in segments:
             words = []

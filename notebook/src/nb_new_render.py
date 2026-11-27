@@ -1,4 +1,52 @@
 import glob, json, os, subprocess, time
+import re as _re
+
+# Validator SRT (cadangan): kalau cell 3b belum dijalankan di sesi ini,
+# definisi di bawah dipakai supaya cell tidak crash NameError.
+# Isinya sama dengan notebook/src/nb_new_validate.py.
+if "assert_valid_segments" not in globals():
+    _CJK_RE = _re.compile(r"[\u4e00-\u9fff]")
+
+    def _has_mandarin(text):
+        return bool(text and _CJK_RE.search(text))
+
+    def validate_segments(segs, check_id=True):
+        errors = []
+        prev_end = None
+        for idx, s in enumerate(segs):
+            start = float(s.get("start", 0.0))
+            end = float(s.get("end", 0.0))
+            if not end > start:
+                errors.append(f"segmen {idx}: end ({end}) tidak lebih besar dari start ({start})")
+                continue
+            if prev_end is not None and start < prev_end - 0.001:
+                errors.append(f"segmen {idx}: overlap / tidak monoton (start {start} < prev end {prev_end})")
+            prev_end = max(prev_end or 0.0, end)
+            if end - start < 0.35 or end - start > 7.0:
+                errors.append(f"segmen {idx}: durasi {end - start:.2f}s di luar batas wajar")
+            for key in ("text_zh", "text_id"):
+                txt = (s.get(key) or "").strip()
+                if not txt:
+                    continue
+                if len(txt.split("\n")) > 2:
+                    errors.append(f"segmen {idx} ({key}): lebih dari 2 baris")
+                for line in txt.split("\n"):
+                    if len(line) > 42:
+                        errors.append(f"segmen {idx} ({key}): baris {len(line)} karakter, maks 42")
+            if check_id:
+                txt_id = (s.get("text_id") or "").strip()
+                zh = (s.get("text_zh") or "").strip()
+                if zh and not txt_id:
+                    errors.append(f"segmen {idx}: belum diterjemah (text_id kosong)")
+                elif txt_id and _has_mandarin(txt_id):
+                    errors.append(f"segmen {idx}: SRT ID masih berisi Mandarin")
+        return errors
+
+    def assert_valid_segments(segs, where=""):
+        errors = validate_segments(segs)
+        if errors:
+            raise ValueError(f"validator SRT gagal {where}: " + "; ".join(errors[:10]))
+        return True
 
 # ========================= ffmpeg progress =========================
 def run_ffmpeg(cmd, dur, tag):
