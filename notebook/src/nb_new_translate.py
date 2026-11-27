@@ -12,7 +12,7 @@ def has_mandarin(text):
 # di sesi ini — mis. runtime restart lalu cell Translate dijalankan
 # langsung — definisi di bawah dipakai supaya cell tidak crash NameError.
 # Isinya sama dengan notebook/src/nb_new_validate.py.
-if "assert_valid_segments" not in globals():
+if "assert_valid_segments" not in globals() or "normalize_segments" not in globals():
     def _wrap_text(text, max_len=42):
         text = (text or "").strip()
         if not text:
@@ -341,7 +341,20 @@ for i, vid_path in enumerate(videos, 1):
     missing = sum(1 for s in segs if (s.get("text_zh") or "").strip()
                   and not (s.get("text_id") or "").strip())
     if not missing and os.path.exists(out_id_srt):
-        print(f"[tr] {i}/{len(videos)} {stem}: skip ({len(segs)} segmen sudah diterjemah)", flush=True)
+        # Sudah diterjemah, tapi segmennya bisa jadi belum dinormalisasi
+        # (SRT sempat ditulis sebelum validator gagal di versi lama).
+        # Rapikan dan tulis ulang kalau ada yang berubah — tanpa ini
+        # cell akan skip dan SRT yang lama (overlap) tetap dipakai.
+        segs, _nstats = normalize_segments(segs)
+        if _nstats["trimmed"] or _nstats["dropped"] or _nstats["wrapped"] or _nstats["split"]:
+            payload["segments"] = segs
+            write_json_atomic(ep_json, payload)
+            write_srt(segs, out_id_srt, "text_id")
+            print(f"[tr] {i}/{len(videos)} {stem}: dinormalisasi ulang "
+                  f"dipotong={_nstats['trimmed']} dibuang={_nstats['dropped']} "
+                  f"dibungkus={_nstats['wrapped']} dipecah={_nstats['split']}", flush=True)
+        else:
+            print(f"[tr] {i}/{len(videos)} {stem}: skip ({len(segs)} segmen sudah diterjemah)", flush=True)
         continue
     print(f"[tr] {i}/{len(videos)} {stem}: {len(segs)} segmen, {missing} baru", flush=True)
     segs, failed_final = translate_segments(segs)

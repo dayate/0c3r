@@ -142,6 +142,22 @@ assert [s.get("text_id") for s in data["segments"]] == ["Halo", "Sampai jumpa"],
 assert os.path.exists(os.path.join(out, "per_episode", stem + "_id.srt"))
 print("CELL TRANSLATE OK")
 
+# Guard tidak boleh bolong: kalau cell 3b LAMA yang jalan (validator ada
+# tapi normalize belum ada), cell Translate tetap harus mendefinisikan
+# normalize_segments, bukan NameError / diam-diam skip.
+g3 = dict(g)
+g3.pop("normalize_segments", None)
+g3["assert_valid_segments"] = lambda segs, where="": True  # validator lama
+exec(compile(open(os.path.join(SRC, "nb_new_translate.py"), encoding="utf-8").read(), "translate3", "exec"), g3)
+assert callable(g3["normalize_segments"]), "guard harus mendefinisikan normalize walau validator lama ada"
+print("CELL TRANSLATE GUARD OK")
+
+# Jalankan lagi cell Translate di g yang sama: episode sudah diterjemah
+# dan SRT ID sudah ada — harus dinormalisasi ulang, bukan skip buta.
+exec(compile(open(os.path.join(SRC, "nb_new_translate.py"), encoding="utf-8").read(), "translate4", "exec"), g)
+assert g["validate_segments"](json.load(open(ep_json, encoding="utf-8"))["segments"]) == []
+print("CELL TRANSLATE RENORMALIZE OK")
+
 exec(compile(open(os.path.join(SRC, "nb_new_render.py"), encoding="utf-8").read(), "rd", "exec"), g)
 hard = os.path.join(out, "episodes_hardsub_id", stem + "_id_hardsub.mp4")
 assert os.path.getsize(hard) > 0, "hardsub tidak dibuat"

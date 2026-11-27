@@ -4,7 +4,7 @@ import re as _re
 # Validator SRT (cadangan): kalau cell 3b belum dijalankan di sesi ini,
 # definisi di bawah dipakai supaya cell tidak crash NameError.
 # Isinya sama dengan notebook/src/nb_new_validate.py.
-if "assert_valid_segments" not in globals():
+if "assert_valid_segments" not in globals() or "normalize_segments" not in globals():
     _CJK_RE = _re.compile(r"[\u4e00-\u9fff]")
 
     def _has_mandarin(text):
@@ -350,8 +350,7 @@ for i, vid_path in enumerate(videos, 1):
     segs = payload.get("segments", [])
     # Normalisasi dulu (rapikan overlap / baris panjang), baru validasi.
     # Jangan bakar video dari SRT yang tidak valid / belum diterjemah penuh.
-    if "normalize_segments" in globals():
-        segs, _nstats = normalize_segments(segs)
+    segs, _nstats = normalize_segments(segs)
     assert_valid_segments(segs, where=f"render {stem}")
     dur, vw, vh = probe(vid_path)
     print(f"[render] {i}/{len(videos)} {stem} | {dur:.1f}s {vw}x{vh} {len(segs)} segmen", flush=True)
