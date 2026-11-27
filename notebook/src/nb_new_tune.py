@@ -70,8 +70,21 @@ def _extract_frame(vid_path, t, out_path):
 
 
 def _get_engine():
-    from rapidocr_onnxruntime import RapidOCR
-    return RapidOCR()
+    # Sama seperti cell OCR: RapidOCR 3.x, use_cuda ikut profil.
+    # (Duplikat kecil dari nb_new_ocr.py supaya cell tuning tetap bisa
+    # jalan sendiri — cell ini dieksekusi SEBELUM cell OCR.)
+    use_cuda = globals().get("OCR_ENGINE", "rapidocr3-gpu") == "rapidocr3-gpu"
+    if use_cuda:
+        import ctypes
+        import glob
+        import sysconfig
+        for p in sorted(glob.glob(sysconfig.get_paths()["purelib"] + "/nvidia/*/lib/lib*.so*")):
+            try:
+                ctypes.CDLL(p, mode=ctypes.RTLD_GLOBAL)
+            except OSError:
+                pass
+    from rapidocr import RapidOCR
+    return RapidOCR(params={"EngineConfig.onnxruntime.use_cuda": use_cuda})
 
 
 def _gate_bright(crop_arr):
@@ -100,17 +113,17 @@ def _prepare_crop(img, roi, upscale, max_width):
 
 def _ocr_frame(engine, arr, min_conf):
     """OCR satu frame. Return [(text, conf, quad)] dengan quad dalam
-    koordinat array yang di-OCR (sudah di-upscale)."""
-    result, _elapse = engine(arr)
-    out = []
-    if not result:
-        return out
-    for box, text, prob in result:
+    koordinat array yang di-OCR (sudah di-upscale).
+    API RapidOCR 3.x: out.txts/.scores/.boxes; frame tanpa teks -> None."""
+    out = engine(arr)
+    res = []
+    boxes = out.boxes if out.boxes is not None else []
+    for text, prob, box in zip(out.txts or (), out.scores or (), boxes):
         text = str(text).strip()
         conf = float(prob)
         if text and conf >= min_conf:
-            out.append((text, conf, [[float(p[0]), float(p[1])] for p in box]))
-    return out
+            res.append((text, conf, [[float(p[0]), float(p[1])] for p in box]))
+    return res
 
 
 def _draw_result(img, roi, detections, upscale, crop_w, crop_h, out_path):

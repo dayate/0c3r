@@ -6,7 +6,14 @@
 ## 1. Kesimpulan utama
 
 1. **Kecepatan Whisper bukan risiko utama — sejak profil 2026-11-27, Whisper memakai `small` + beam 1 di profil CPU (pc/vm/instabox) dan `large-v3-turbo` + beam 5 di profil GPU (colab/kaggle), karena hanya untuk timing, bukan transkrip utama.** Model `small` ~4-6x lebih cepat dari `large-v3-turbo` di CPU; risiko sebenarnya ada di *overhead di sekitar model*: alokasi VM Colab, cold download model, upload/download file.
-2. **Jalur 3 (hardsub) bukan dibatasi model OCR, tapi dibatasi cara frame diproses.** Inferensi satu frame per panggilan + decode sekuensial adalah biang kelambatan, bukan akurasi model.
+2. **Jalur 3 (hardsub) bukan lagi dibatasi OCR di GPU.** Sejak 2026-11-27, notebook
+   Colab/Kaggle pakai RapidOCR 3.x + onnxruntime-gpu (PP-OCRv6): tes 10 frame
+   episode 1 di T4 — CPU 5,25 dtk/frame vs GPU **0,62 dtk/frame (8,4x)**,
+   teks identik, OCR 5 episode ~7 menit (dulu ~63 menit CPU). Syaratnya CUDA
+   runtime cocok dengan build onnxruntime-gpu (Colab CUDA 13 -> ORT >=1.27
+   + cuDNN cu13; build lama diam-diam fallback ke CPU — cell OCR men-assert
+   CUDA sebelum jalan). Di CPU (pc/vm) OCR tetap 1.2.3 karena 3.x di CPU
+   malah lebih lambat (5,25 vs 2,9 dtk/frame).
 3. **Jalur 1 (softsub) paling rapuh di lingkungan cloud.** IP datacenter memicu bot-check YouTube; tanpa `curl_cffi` caption body kembali kosong tanpa error.
 4. **`BatchedInferencePipeline` memberi ~3x speedup tapi menurunkan kualitas** pada audio tertentu (segmen hilang, bahasa berpindah di tengah segmen).
 5. **Kuota Colab tidak bisa dijadikan SLA.** GPU tidak dijamin, VM maksimum 12 jam, tipe akselerator berubah-ubah.

@@ -66,6 +66,26 @@ assert segs4[0]["text_id"] == "", segs4
 assert lp.validate_segments(segs4), "validator harus menolak baris belum diterjemah"
 print("TRANSLATE FAIL OK")
 
+# --- translate: baris non-Mandarin diteruskan apa adanya, provider tidak dipanggil ---
+lp._cache.clear()
+lp._cache_prov.clear()
+calls_p = []
+
+def _deepl_rec(t):
+    calls_p.append(t)
+    return None
+
+lp.deepl_translate = _deepl_rec
+lp.google_translate = lambda t: (None, None)
+lp.llm_translate = lambda lines: None
+segs_p = [{"text_zh": "ALSURR 120."}, {"text_zh": "你好"}]
+segs_p, failed_p = lp.translate_segments(segs_p)
+assert len(failed_p) == 1 and failed_p[0]["text_zh"] == "你好", failed_p
+assert segs_p[0]["text_id"] == "ALSURR 120.", segs_p
+assert lp._cache_prov.get("ALSURR 120.") == "passthrough"
+assert calls_p == ["你好"], calls_p
+print("TRANSLATE PASSTHROUGH OK")
+
 # --- validator SRT ---
 good = [{"start": 0.5, "end": 1.5, "text_zh": "你好", "text_id": "Halo"},
         {"start": 2.0, "end": 3.0, "text_zh": "再见", "text_id": "Sampai jumpa"}]
@@ -228,8 +248,14 @@ if _ilu2.find_spec("yaml") is not None:
     assert "termux" not in _profs, "termux sengaja tidak ada (tidak direkomendasikan)"
     for _name, _p in _profs.items():
         for _k in ("platform", "episodes_dir", "base_out_dir", "fps", "roi",
-                   "min_conf", "upscale", "whisper_model", "whisper_beam", "blur_mode"):
+                   "min_conf", "upscale", "whisper_model", "whisper_beam", "blur_mode",
+                   "ocr_engine"):
             assert _k in _p, (_name, _k)
+    assert _profs["colab"]["ocr_engine"] == "rapidocr3-gpu"
+    assert _profs["kaggle"]["ocr_engine"] == "rapidocr3-gpu"
+    assert _profs["pc"]["ocr_engine"] == "rapidocr1-cpu"
+    assert _profs["vm"]["ocr_engine"] == "rapidocr1-cpu"
+    assert _profs["instabox"]["ocr_engine"] == "rapidocr1-cpu"
     assert _profs["colab"]["mount_drive"] is True
     assert _profs["kaggle"]["mount_drive"] is False
     assert _profs["kaggle"]["episodes_dir"].startswith("/kaggle/input/")
@@ -240,11 +266,15 @@ if _ilu2.find_spec("yaml") is not None:
     lp.apply_profile("colab")
     assert lp.PROFILE == "colab" and lp.FPS == 1.0
     assert lp.WHISPER_MODEL == "large-v3-turbo" and lp.WHISPER_BEAM == 5
+    assert lp.OCR_ENGINE == "rapidocr3-gpu"
     assert lp.fingerprint()["profile"] == "colab"
+    assert lp.fingerprint()["ocr"] == "rapidocr3-gpu"
     assert lp._whisper_fingerprint()["profile"] == "colab"
     lp.apply_profile("pc")
     assert lp.PROFILE == "pc" and lp.FPS == 0.5 and lp.WHISPER_MODEL == "small"
+    assert lp.OCR_ENGINE == "rapidocr1-cpu"
     assert lp.fingerprint()["profile"] == "pc"
+    assert lp.fingerprint()["ocr"] == "rapidocr1-cpu"
     try:
         lp.apply_profile("termux")
         raise AssertionError("profil termux harus ditolak")

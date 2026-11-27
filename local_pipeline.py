@@ -95,6 +95,7 @@ def load_profiles():
 def apply_profile(name):
     global PROFILE, FPS, ROI, MIN_CONF, UPSCALE, MAX_WIDTH, BATCH_SIZE, MIN_DUR
     global WHISPER_MODEL, WHISPER_BEAM, BLUR_MODE, BLUR_RADIUS, BLUR_TIME_PAD, ALWAYS_BLUR
+    global OCR_ENGINE
     profiles = load_profiles()
     if name not in profiles:
         raise ValueError(
@@ -102,6 +103,10 @@ def apply_profile(name):
             f"(ada: {', '.join(sorted(profiles))})")
     p = profiles[name]
     PROFILE = name
+    # Mesin OCR: lokal HANYA rapidocr1-cpu (1.2.3). rapidocr3-gpu butuh GPU +
+    # onnxruntime-gpu — di lokal tidak ada, dan 3.x di CPU malah lebih lambat
+    # (5,25 vs 2,9 dtk/frame). main() menolak profil GPU dengan jelas.
+    OCR_ENGINE = p.get("ocr_engine") or "rapidocr1-cpu"
     # Whisper HANYA untuk timing + cadangan; teks tetap dari OCR.
     FPS = float(CFG.get("FPS") or p.get("fps") or 0.5)  # 0.5 lebih cepat,
                         # timing kasar diperbaiki fusi Whisper (1 fps hanya
@@ -127,6 +132,7 @@ def apply_profile(name):
 
 # Default bawaan (profil pc) — dipakai kalau profiles.yaml / PyYAML tidak ada.
 PROFILE = CFG.get("profile") or "pc"
+OCR_ENGINE = "rapidocr1-cpu"
 FPS = float(CFG.get("FPS") or 0.5)
 ROI = (0.05, 0.62, 0.95, 0.93)
 MIN_CONF = 0.65
@@ -400,7 +406,10 @@ def get_engine():
 def fingerprint():
     # roi harus list (bukan tuple) supaya sama setelah JSON round-trip;
     # kalau tuple, resume chunk/episode tidak pernah cocok dan OCR selalu ulang.
-    return {"profile": PROFILE, "fps": FPS, "roi": list(ROI), "min_conf": MIN_CONF, "upscale": UPSCALE,
+    # ocr ikut: RapidOCR 3.x GPU hasilnya beda dari 1.2.3 CPU — checkpoint
+    # lama tidak boleh dipakai ulang setelah ganti engine.
+    return {"profile": PROFILE, "ocr": OCR_ENGINE,
+            "fps": FPS, "roi": list(ROI), "min_conf": MIN_CONF, "upscale": UPSCALE,
             "max_width": MAX_WIDTH, "gate": TEXT_GATE, "gate_min": TEXT_GATE_MIN_BRIGHT}
 
 
@@ -1065,14 +1074,25 @@ def translate_segments(segs):
     Jaminan: tidak ada baris yang dibiarkan Mandarin di text_id.
     """
     todo = []
+    n_passthrough = 0
     for s in segs:
         zh = (s.get("text_zh") or "").strip()
         if not zh:
             s["text_id"] = ""
         elif zh in _cache:
             s["text_id"] = _cache[zh]
+        elif not has_mandarin(zh):
+            # Bukan dialog Mandarin (mis. sampah OCR latin / watermark):
+            # tidak ada yang bisa diterjemah — teruskan apa adanya supaya
+            # satu baris seperti ini tidak memblokir seluruh episode.
+            _cache[zh] = zh
+            _cache_prov[zh] = "passthrough"
+            s["text_id"] = _clean_id(zh)
+            n_passthrough += 1
         else:
             todo.append(zh)
+    if n_passthrough:
+        print(f"  [tr] {n_passthrough} baris non-Mandarin diteruskan apa adanya", flush=True)
 
     uniq = list(dict.fromkeys(todo))
     stats = {"deepl": 0, "google": 0, "mymemory": 0, "llm": 0, "polish": 0}
@@ -1546,6 +1566,13 @@ def main():
         except ValueError as e:
             print(f"error: {e}")
             return 2
+
+    if OCR_ENGINE != "rapidocr1-cpu":
+        print(f"error: profil '{PROFILE}' pakai mesin OCR '{OCR_ENGINE}', "
+              "tapi pipeline lokal hanya mendukung rapidocr1-cpu (1.2.3). "
+              "Pakai --profile pc/vm/instabox untuk lokal, atau jalankan "
+              "notebook Colab/Kaggle untuk rapidocr3-gpu.")
+        return 2
 
     BLUR_MODE = args.blur
 

@@ -296,14 +296,25 @@ def translate_segments(segs):
     berhenti dengan status gagal yang jelas.
     """
     todo = []
+    n_passthrough = 0
     for s in segs:
         zh = (s.get("text_zh") or "").strip()
         if not zh:
             s["text_id"] = ""
         elif zh in _cache:
             s["text_id"] = _cache[zh]
+        elif not has_mandarin(zh):
+            # Bukan dialog Mandarin (mis. sampah OCR latin / watermark):
+            # tidak ada yang bisa diterjemah — teruskan apa adanya supaya
+            # satu baris seperti ini tidak memblokir seluruh episode.
+            _cache[zh] = zh
+            _cache_prov[zh] = "passthrough"
+            s["text_id"] = _clean_id(zh)
+            n_passthrough += 1
         else:
             todo.append(zh)
+    if n_passthrough:
+        print(f"  [tr] {n_passthrough} baris non-Mandarin diteruskan apa adanya", flush=True)
 
     uniq = list(dict.fromkeys(todo))
     stats = {"deepl": 0, "google": 0, "mymemory": 0, "llm": 0, "polish": 0}

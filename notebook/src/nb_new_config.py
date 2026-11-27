@@ -18,6 +18,11 @@ MAX_EPISODES = 200
 # --- Parameter OCR ---
 FPS = 1.0               # colab/kaggle 1 fps (Whisper GPU cepat, OCR 2 vCPU
                         # masih sanggup); pc/vm 0,5 fps
+# Mesin OCR (dari profil, lihat profiles.yaml):
+#   rapidocr3-gpu = RapidOCR 3.x + onnxruntime-gpu, colab/kaggle (tes: 8,4x
+#     lebih cepat dari CPU, 0,62 vs 5,25 dtk/frame, teks identik).
+#   rapidocr1-cpu = rapidocr-onnxruntime 1.2.3 CPU, pc/vm/instabox.
+OCR_ENGINE = "rapidocr3-gpu"
 ROI = (0.05, 0.55, 0.95, 0.93)   # (x_min, y_min, x_max, y_max) rasio 0.0 - 1.0
 MIN_CONF = 0.55         # nilai hasil tuning episode 1 di Colab
 UPSCALE = 3             # nilai hasil tuning episode 1 di Colab
@@ -77,6 +82,7 @@ if _p:
     EPISODES_DIR = _p.get("episodes_dir", EPISODES_DIR)
     BASE_OUT_DIR = _p.get("base_out_dir", BASE_OUT_DIR)
     FPS = float(_p.get("fps", FPS))
+    OCR_ENGINE = _p.get("ocr_engine", OCR_ENGINE)
     ROI = tuple(_p.get("roi", ROI))
     MIN_CONF = float(_p.get("min_conf", MIN_CONF))
     UPSCALE = int(_p.get("upscale", UPSCALE))

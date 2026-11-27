@@ -22,6 +22,13 @@ defaults:
   platform: local
   mount_drive: false      # true: cell mount Google Drive (hanya colab)
   install_cublas: false   # true: pip install nvidia-cublas/cudnn (hanya colab)
+  # Mesin OCR per profil (2026-11-27, hasil tes GPU 8,4x):
+  #   rapidocr3-gpu = RapidOCR 3.x + onnxruntime-gpu (PP-OCRv6), colab/kaggle.
+  #   rapidocr1-cpu = rapidocr-onnxruntime 1.2.3 CPU, pc/vm/instabox (tanpa GPU).
+  # 3.x di CPU malah lebih lambat dari 1.2.3 (5,25 vs 2,9 dtk/frame), jadi
+  # 3.x hanya dipakai kalau ada GPU. ocr_engine ikut fingerprint: ganti
+  # engine = checkpoint OCR lama tidak dipakai ulang.
+  ocr_engine: rapidocr1-cpu
   max_width: 1080
   batch_size: 8
   min_dur: 0.35
@@ -36,6 +43,7 @@ profiles:
     note: "Gratis, T4 GPU, 2 vCPU, ~13 GB RAM. Jalur utama."
     mount_drive: true
     install_cublas: true
+    ocr_engine: rapidocr3-gpu
     episodes_dir: /content/drive/MyDrive/duanju/episodes
     base_out_dir: /content/drive/MyDrive/duanju/suba_hardsub
     fps: 1.0
@@ -48,6 +56,7 @@ profiles:
   kaggle:
     platform: kaggle
     note: "Gratis, T4x2 GPU, 4 CPU, ~29 GB RAM. 30 GPU-jam/minggu, output maks ~20 GB."
+    ocr_engine: rapidocr3-gpu
     episodes_dir: /kaggle/input/duanju-episodes
     base_out_dir: /kaggle/working/suba_hardsub
     fps: 1.0

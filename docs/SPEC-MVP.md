@@ -30,7 +30,7 @@ Colab, dengan komputasi di GPU remote (Colab T4).
 | D8 | ASR model | Tergantung profil (`profiles.yaml`): GPU (colab/kaggle) `large-v3-turbo` beam 5; CPU (pc/vm/instabox) `small` beam 1 (greedy) — hanya untuk timing/fusi, bukan transkrip utama. Bahasa `zh` dikunci, VAD mati, temperature 0,0, word timestamp nyala |
 | D9 | Chunk | 600 detik, idempoten, resumable |
 | D10 | Privasi | File sumber hanya untuk pemrosesan; tidak untuk training |
-| D11 | Mesin OCR | RapidOCR (bukan PaddleOCR) |
+| D11 | Mesin OCR | Tergantung profil: GPU (colab/kaggle) **RapidOCR 3.x + onnxruntime-gpu** (PP-OCRv6, `out = eng(arr)`, CUDA wajib lolos assert — tes 2026-11-27: 0,62 dtk/frame, 8,4x vs CPU, teks identik); CPU (pc/vm/instabox) **rapidocr-onnxruntime 1.2.3** (3.x di CPU malah lebih lambat, 5,25 vs 2,9 dtk/frame). Engine ikut fingerprint, jadi ganti engine = checkpoint OCR lama tidak dipakai ulang |
 | D12 | Blur | `static` dan `dynamic` tetap tersedia sebagai opsi; default `dynamic` (radius 20, power 3, jendela ±0,4 detik) sejak 2026-11-27 — band statis meninggalkan bayangan glyph di latar gelap dan mengaburkan wajah di area tanpa teks |
 | D13 | Profil per device | Satu kode, setting per device di `profiles.yaml` (colab, kaggle, pc, vm, instabox — Termux sengaja tidak ada, tidak direkomendasikan). Notebook: pilih PROFILE di cell config, atau `build_colab_nb.py --profile kaggle` (Colab 25 cell, Kaggle 24 cell; judul section jadi markdown cell, PROFILES di cell tersendiri yang pretty-print). Lokal: `local_pipeline.py --profile pc`. Ganti profil = fingerprint berubah = cache/checkpoint lama tidak dipakai |
 
@@ -97,7 +97,15 @@ Indikator (urut dari paling murah):
 - Sampling: 1 fps via `ffmpeg -vf fps=1` dengan seek per jendela (bukan decode sekuensial).
 - ROI default: (0,05, 0,62, 0,95, 0,93) — area subtitle Mandarin pada video vertikal yang diuji; dapat di-override.
 - Preprocessing: grayscale → upscale 2x bila tinggi teks < 20 px → threshold adaptif.
-- Inferensi: RapidOCR, deteksi per frame, recognition dibatch.
+- Inferensi: RapidOCR 3.x di GPU (colab/kaggle) — satu panggilan `out = eng(arr)`
+  per frame (det+cls+rec internal, PP-OCRv6); pipeline lokal tetap 1.2.3 CPU
+  (det per frame + rec dibatch). API 3.x mengembalikan `RapidOCROutput`
+  (`.txts`/`.scores`/`.boxes`); frame tanpa teks -> `txts`/`scores` None.
+- Kartu nama/peran difilter PER DETEKSI di `ocr_batch` (3.x): nama + jabatan
+  terdeteksi sebagai 2 box yang kalau digabung jadi bbox hampir persegi dan
+  lolos tes tegak level segmen — per deteksi box-nya tetap tegak. Bentuk
+  dihitung dari quad mentah (piksel), bukan bbox ternormalisasi, karena
+  normalisasi ROI mengubah aspek box tegak jadi persegi.
 - Deduplikasi: frame berurutan dengan teks identik digabung jadi satu segmen.
 - Output: `chunks/<id>/ocr.json` — `[{start, end, text, conf, bbox}]`
 

@@ -13,6 +13,8 @@ tetap sama secara manual.
 ## Cara kerja
 
 1. **OCR** — RapidOCR sampling 1 fps di ROI subtitle, checkpoint per 600 detik.
+   Di Colab/Kaggle: RapidOCR 3.x GPU (0,62 dtk/frame, 8,4x vs CPU). Di lokal/PC:
+   rapidocr-onnxruntime 1.2.3 CPU. Engine ikut fingerprint di `profiles.yaml`.
 2. **Whisper (cell terpisah)** — faster-whisper large-v3-turbo, bahasa Mandarin
    dikunci, untuk merapikan timing OCR dari ±1 detik ke ~0,1–0,2 detik dan
    mengisi baris yang kelewat OCR. Teks tetap dari OCR, timing dari Whisper.

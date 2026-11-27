@@ -36,11 +36,50 @@ def write_json_atomic(path, payload):
 _engine = None
 
 
+def _preload_cuda_libs():
+    """Preload lib CUDA/cuDNN dari paket pip nvidia supaya ONNX Runtime
+    menemukannya saat load CUDA EP. (Set LD_LIBRARY_PATH lewat os.environ
+    TIDAK mempan: glibc mengunci search path saat proses jalan — dibuktikan
+    di VM. Preload pakai ctypes RTLD_GLOBAL sudah dibuktikan mempan.)"""
+    import ctypes
+    import glob
+    import sysconfig
+    for p in sorted(glob.glob(sysconfig.get_paths()["purelib"] + "/nvidia/*/lib/lib*.so*")):
+        try:
+            ctypes.CDLL(p, mode=ctypes.RTLD_GLOBAL)
+        except OSError:
+            pass
+
+
+def _assert_cuda():
+    """Buktikan session ONNX benar-benar jalan di CUDA, bukan cuma terdaftar.
+    RapidOCR diam-diam fallback ke CPU kalau CUDA EP gagal init (pernah
+    kejadian: ORT 1.26 build CUDA 12 vs Colab CUDA 13) — assert ini yang
+    menangkapnya sebelum OCR jalan 1 episode penuh di CPU tanpa sadar."""
+    import glob
+    import os
+    import rapidocr
+    from onnxruntime import InferenceSession, SessionOptions
+    det = glob.glob(os.path.join(os.path.dirname(rapidocr.__file__),
+                                 "models", "PP-OCRv6_det_small.onnx"))
+    assert det, "model det RapidOCR tidak ketemu"
+    s = InferenceSession(det[0], SessionOptions(),
+                         providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+    assert "CUDAExecutionProvider" in s.get_providers(), \
+        "CUDA EP terdaftar tapi session jatuh ke CPU — cek install cell (ORT vs CUDA)"
+
+
 def get_engine():
+    """RapidOCR 3.x (model default PP-OCRv6). use_cuda ikut profil:
+    colab/kaggle GPU, pc/vm CPU. Di GPU, engine WAJIB lolos _assert_cuda."""
     global _engine
     if _engine is None:
-        from rapidocr_onnxruntime import RapidOCR
-        _engine = RapidOCR()
+        use_cuda = globals().get("OCR_ENGINE", "rapidocr3-gpu") == "rapidocr3-gpu"
+        if use_cuda:
+            _preload_cuda_libs()
+            _assert_cuda()
+        from rapidocr import RapidOCR
+        _engine = RapidOCR(params={"EngineConfig.onnxruntime.use_cuda": use_cuda})
     return _engine
 
 
@@ -48,7 +87,10 @@ def fingerprint():
     # roi harus list (bukan tuple) supaya sama setelah JSON round-trip;
     # kalau tuple, resume chunk/episode tidak pernah cocok dan OCR selalu ulang.
     # profile ikut: ganti profil = setting beda = cache lama tidak dipakai.
+    # ocr ikut: RapidOCR 3.x GPU hasilnya beda dari 1.2.3 CPU — checkpoint
+    # lama tidak boleh dipakai ulang setelah ganti engine.
     return {"profile": globals().get("PROFILE", "colab"),
+            "ocr": globals().get("OCR_ENGINE", "rapidocr3-gpu"),
             "fps": FPS, "roi": list(ROI), "min_conf": MIN_CONF, "upscale": UPSCALE,
             "max_width": MAX_WIDTH, "gate": TEXT_GATE, "gate_min": TEXT_GATE_MIN_BRIGHT}
 
@@ -120,31 +162,42 @@ def _bbox(quads, up, cw, ch):
 
 def ocr_batch(engine, frames):
     """frames: [(arr, cw, ch)] -> [(text, bbox|None)].
-    Det per frame (API 1.2.3 tidak menerima list), rec satu batch untuk semua crop."""
-    results = [("", None)] * len(frames)
-    metas, crops = [], []
-    for i, (arr, cw, ch) in enumerate(frames):
-        boxes, _ = engine.text_detector(arr)
-        if boxes is None or len(boxes) < 1:
-            continue
-        boxes = engine.sorted_boxes(boxes)
-        cl = engine.get_crop_img_list(arr, boxes)
-        metas.append((i, len(crops), len(cl), boxes))
-        crops.extend(cl)
-
-    if not crops:
-        return results
-
-    rec, _ = engine.text_recognizer(crops)
-    for i, base, n, boxes in metas:
+    API RapidOCR 3.x: out = engine(arr) -> RapidOCROutput (.txts/.scores/
+    .boxes ndarray (n,4,2)). Frame tanpa teks mengembalikan txts/scores
+    None (bukan list kosong) — dijaga dengan `or ()`.
+    (Dulu 1.2.3: text_detector + text_recognizer terpisah. 3.x lebih akurat:
+    PP-OCRv6, frame 43 episode 1 conf 0.995 vs 0.72 di 1.2.3; di GPU T4
+    0,62 dtk/frame vs 5,25 dtk/frame CPU — tes 2026-11-27.)"""
+def ocr_batch(engine, frames):
+    """frames: [(arr, cw, ch)] -> [(text, bbox|None)].
+    API RapidOCR 3.x: out = engine(arr) -> RapidOCROutput (.txts/.scores/
+    .boxes ndarray (n,4,2)). Frame tanpa teks mengembalikan txts/scores
+    None (bukan list kosong) — dijaga dengan `or ()`.
+    (Dulu 1.2.3: text_detector + text_recognizer terpisah. 3.x lebih akurat:
+    PP-OCRv6, frame 43 episode 1 conf 0.995 vs 0.72 di 1.2.3; di GPU T4
+    0,62 dtk/frame vs 5,25 dtk/frame CPU — tes 2026-11-27.)"""
+    results = []
+    for arr, cw, ch in frames:
+        out = engine(arr)
+        txts = out.txts or ()
+        scores = out.scores or ()
+        boxes = out.boxes if out.boxes is not None else []
         texts, quads = [], []
-        for k in range(n):
-            txt = str(rec[base + k][0]).strip()
-            if txt and float(rec[base + k][1]) >= MIN_CONF:
-                texts.append(txt)
-                quads.append(boxes[k])
+        for t, s, b in zip(txts, scores, boxes):
+            if t and float(s) >= MIN_CONF:
+                # Kartu nama/peran difilter PER DETEKSI, bukan cuma per segmen:
+                # 3.x mendeteksi nama + jabatan sebagai 2 box yang kalau
+                # digabung jadi bbox hampir persegi (w/h ~0,85) dan lolos
+                # tes tegak di drop_name_cards. Per deteksi, box-nya tetap
+                # tegak (nama w/h ~0,57, jabatan w/h ~0,16) dan kena filter.
+                if _is_name_card_det(str(t).strip(), b, cw, ch):
+                    continue
+                texts.append(str(t).strip())
+                quads.append(b)
         if texts:
-            results[i] = (" ".join(texts), _bbox(quads, UPSCALE, frames[i][1], frames[i][2]))
+            results.append((" ".join(texts), _bbox(quads, UPSCALE, cw, ch)))
+        else:
+            results.append(("", None))
     return results
 
 
@@ -158,6 +211,33 @@ def _merge_boxes(boxes):
     if x1 <= x0 or y1 <= y0:
         return None
     return [round(x0, 4), round(y0, 4), round(x1, 4), round(y1, 4)]
+
+
+_ROLE_WORDS = ("总裁", "董事长", "总经理", "副总裁", "集团", "董事", "总裁夫人")
+
+
+def _is_name_card_det(text, quad, cw, ch):
+    """Kartu nama/peran, dicek per deteksi (dipakai ocr_batch).
+    Bentuk dihitung dari quad MENTAH (piksel array), bukan bbox
+    ternormalisasi: normalisasi ROI (lebar 0,9 vs tinggi 0,38) mengubah
+    aspek box tegak jadi hampir persegi (w/h 0,57 di piksel -> ~1,0
+    ternormalisasi), sehingga tes tegak is_name_card lolos begitu saja.
+    Tinggi minimal tetap dicek dalam koordinat ternormalisasi (>= 10%)."""
+    if not text or quad is None:
+        return False
+    xs = [float(p[0]) for p in quad]
+    ys = [float(p[1]) for p in quad]
+    qw, qh = max(xs) - min(xs), max(ys) - min(ys)
+    if qh <= 0 or qw >= 0.6 * qh:
+        return False
+    h_norm = (qh / UPSCALE / ch) * (ROI[3] - ROI[1])
+    if h_norm < 0.10:
+        return False
+    if any(k in text for k in _ROLE_WORDS):
+        return True
+    if len(text.strip()) <= 4:
+        return True
+    return False
 
 
 def is_name_card(text, bbox):
@@ -175,8 +255,7 @@ def is_name_card(text, bbox):
     w, h = x1 - x0, y1 - y0
     if h <= 0 or w >= 0.6 * h or h < 0.10:
         return False
-    role_words = ("总裁", "董事长", "总经理", "副总裁", "集团", "董事", "总裁夫人")
-    if any(k in text for k in role_words):
+    if any(k in text for k in _ROLE_WORDS):
         return True
     if len(text.strip()) <= 4:
         return True
