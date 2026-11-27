@@ -27,7 +27,7 @@ Colab, dengan komputasi di GPU remote (Colab T4).
 | D5 | Format output | **SRT saja** (ASS/VTT pasca-MVP) + video hardsub ID |
 | D6 | Terjemahan | Gratis dulu (DeepL → Google → MyMemory), LLM fallback; **tidak ada baris Mandarin yang dibiarkan di SRT ID**. Baris MyMemory/Google di-polish LLM (kalau ada key); kartu nama/peran difilter, tanda kutip pembungkus dibersihkan |
 | D7 | Jalur pipeline | **Jalur 3 (hardsub/OCR + Whisper timing) saja**; Jalur 1 softsub dan Jalur 2 Whisper-only ditunda |
-| D8 | ASR model | `large-v3-turbo` (faster-whisper, `compute_type=float16`), bahasa `zh` dikunci, VAD mati, temperature 0,0, word timestamp nyala — hanya untuk timing/fusi, bukan transkrip utama |
+| D8 | ASR model | `small` (faster-whisper, `compute_type=float16` di GPU / `int8` di CPU), beam 1 (greedy), bahasa `zh` dikunci, VAD mati, temperature 0,0, word timestamp nyala — hanya untuk timing/fusi, bukan transkrip utama. `large-v3-turbo` tetap tersedia lewat config kalau butuh akurasi penuh |
 | D9 | Chunk | 600 detik, idempoten, resumable |
 | D10 | Privasi | File sumber hanya untuk pemrosesan; tidak untuk training |
 | D11 | Mesin OCR | RapidOCR (bukan PaddleOCR) |
@@ -103,13 +103,18 @@ Indikator (urut dari paling murah):
 ### 5.3 Whisper timing + fusi (cell terpisah, Cell 4b)
 
 Tujuan cell ini hanya satu: **timing yang pas dan tidak miss timing**.
-OCR 1 fps memberi timing ±1 detik dan bisa melewatkan baris pendek. Whisper
+OCR 0.5 fps memberi timing ±2 detik dan bisa melewatkan baris pendek. Whisper
 memberi timing kata yang jauh lebih rapat.
 
-- Model: faster-whisper `large-v3-turbo`, `compute_type=float16`, bahasa `zh` dikunci.
-- Setting yang dipakai (terbukti di tes 24–25 Nov): `vad_filter=False`,
-  `condition_on_previous_text=False`, `temperature=0.0`, `beam_size=5`,
-  `word_timestamps=True`.
+- Model: faster-whisper `small`, `compute_type=float16` (GPU) / `int8` (CPU),
+  bahasa `zh` dikunci. `large-v3-turbo` tetap tersedia lewat config kalau
+  butuh akurasi penuh.
+- Setting yang dipakai (metode cepat 2026-11-27): `vad_filter=False`,
+  `condition_on_previous_text=False`, `temperature=0.0`, `beam_size=1`
+  (greedy), `word_timestamps=True`. Whisper hanya untuk timing, jadi model
+  kecil sudah cukup — ~4-6x lebih cepat dari large-v3-turbo di CPU.
+- OCR + Whisper jalan paralel di pipeline lokal (ThreadPoolExecutor); di
+  Colab cell tetap berurutan karena Whisper GPU sudah cepat.
 - Audio diekstrak mono 16 kHz, diproses per chunk 600 detik yang sama dengan OCR,
   checkpoint per chunk, resumable. Cell ini boleh dilewati — kalau dilewati,
   timing tetap memakai OCR (±1 detik).

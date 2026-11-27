@@ -3,12 +3,16 @@
 
 HANYA UNTUK TESTING. Jalur utama adalah notebook Colab (notebook/src/).
 File ini adalah cermin untuk testing lokal, bukan sumber kebenaran.
-Cell Whisper timing + fusi hanya ada di notebook; di lokal timing tetap
-mengikuti OCR (±1 detik).
 
 Alur per episode: probe -> extract frame (fps sampling) -> OCR (ROI, gated, batched)
++ Whisper timing (model kecil, paralel dengan OCR) -> fusi OCR+Whisper
 -> dedupe jadi segmen -> translate (gratis DeepL -> Google -> MyMemory, LLM fallback)
 -> SRT zh/id -> render hardsub (blur band subtitle + burn sub ID, satu pass).
+
+Metode cepat (2026-11-27): Whisper HANYA untuk timing, jadi model kecil
+("small", beam 1/greedy) sudah cukup — ~4-6x lebih cepat dari large-v3-turbo
+di CPU. OCR 0.5 fps (timing kasar diperbaiki fusi Whisper). OCR + Whisper
+jalan paralel (thread). Render libx264 preset veryfast (NVENC dulu kalau ada).
 
 Input  : ./input/*.mp4
 Output : ./output/per_episode/  ./output/hardsub/  ./output/merged/
@@ -22,6 +26,7 @@ Contoh:  .venv\\Scripts\\python.exe local_pipeline.py --limit 1
 """
 
 import argparse
+import difflib
 import glob
 import json
 import logging
@@ -33,6 +38,8 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import wave
+from concurrent.futures import ThreadPoolExecutor
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -64,13 +71,24 @@ CFG = _load_config()
 CHUNK_SECONDS = int(CFG.get("MAX_CHUNK_DURATION") or CFG.get("CHUNK_SECONDS") or 600)
 MAX_EPISODES = int(CFG.get("MAX_EPISODES") or 0)  # 0 = semua
 
-FPS = 1                 # sampling; 0.5 lebih cepat, 1 lebih presisi timing
+FPS = float(CFG.get("FPS") or 0.5)  # sampling; 0.5 lebih cepat, timing kasar
+                        # diperbaiki fusi Whisper (1 fps hanya kalau butuh
+                        # presisi OCR mentah tanpa Whisper)
 ROI = (0.05, 0.62, 0.95, 0.93)
 MIN_CONF = 0.65
 UPSCALE = 2             # diukur: 1080p+up2 akurat sama dgn 960+up3, 1.6x lebih cepat
 MAX_WIDTH = 1080        # frame lebih lebar dari ini di-resize sebelum crop
 BATCH_SIZE = 8          # frame per panggilan OCR (det per frame, rec satu batch)
 MIN_DUR = 0.35          # segmen lebih pendek dari ini dibuang
+
+# Whisper HANYA untuk timing + cadangan; teks tetap dari OCR. Karena itu
+# model kecil sudah cukup: "small" ~4-6x lebih cepat dari large-v3-turbo
+# di CPU dan timing kata-nya tetap rapat. large-v3-turbo tetap tersedia
+# lewat suba_config.json kalau suatu saat butuh akurasi penuh.
+WHISPER_MODEL = CFG.get("WHISPER_MODEL") or "small"
+WHISPER_BEAM = int(CFG.get("WHISPER_BEAM") or 1)  # 1 = greedy, tercepat
+WHISPER_LANG = "zh"
+WHISPER_MAX_SHIFT = 1.5  # detik, batas geser timing OCR ke timing Whisper
 
 # Gate murah: subtitle drama putih terang. ROI tanpa pixel putih = tidak ada teks.
 # shortcut: subtitle berwarna/gelap bisa lolos gate ini (false negative) -> set False.
@@ -328,7 +346,9 @@ def get_engine():
 
 
 def fingerprint():
-    return {"fps": FPS, "roi": ROI, "min_conf": MIN_CONF, "upscale": UPSCALE,
+    # roi harus list (bukan tuple) supaya sama setelah JSON round-trip;
+    # kalau tuple, resume chunk/episode tidak pernah cocok dan OCR selalu ulang.
+    return {"fps": FPS, "roi": list(ROI), "min_conf": MIN_CONF, "upscale": UPSCALE,
             "max_width": MAX_WIDTH, "gate": TEXT_GATE, "gate_min": TEXT_GATE_MIN_BRIGHT}
 
 
@@ -517,6 +537,304 @@ def extract_segments(vid_path, dur):
     if n_cards:
         log.info("[ocr] kartu nama dibuang: %d", n_cards)
     return segs, totals
+
+
+# ───────────────────────── Whisper timing + fusi ─────────────────────────
+# Cermin notebook/src/nb_new_whisper.py. Whisper HANYA untuk timing:
+# teks pakai OCR, timing pakai Whisper. Model kecil ("small", beam 1)
+# sudah cukup untuk timestamp kata — large-v3-turbo hanya kalau butuh
+# akurasi penuh (atur WHISPER_MODEL di suba_config.json).
+_cpu_model = None  # diisi saat fallback CPU karena libcublas hilang
+
+
+def _whisper_fingerprint():
+    return {
+        "model": WHISPER_MODEL,
+        "lang": WHISPER_LANG,
+        "vad_filter": False,
+        "condition_on_previous_text": False,
+        "temperature": 0.0,
+        "beam_size": WHISPER_BEAM,
+        "word_timestamps": True,
+        "chunk_seconds": CHUNK_SECONDS,
+    }
+
+
+def _extract_audio(vid_path, wav_path):
+    if os.path.exists(wav_path):
+        return wav_path
+    os.makedirs(os.path.dirname(wav_path), exist_ok=True)
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-i", vid_path, "-vn", "-ac", "1",
+         "-ar", "16000", wav_path],
+        check=True, capture_output=True)
+    return wav_path
+
+
+def _load_wav_array(path):
+    """Baca WAV ke float32 ndarray (mono, -1.0..1.0).
+
+    Jangan serahkan path WAV ke faster-whisper: versi 1.2.1 + PyAV 19
+    crash di decode_audio -> av.open(..., metadata_errors="ignore").
+    Membaca WAV langsung dengan stdlib wave + numpy melewati jalur itu.
+    """
+    import numpy as np
+
+    with wave.open(path, "rb") as wf:
+        n_channels = wf.getnchannels()
+        sampwidth = wf.getsampwidth()
+        n_frames = wf.getnframes()
+        raw = wf.readframes(n_frames)
+    if sampwidth == 2:
+        audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    elif sampwidth == 4:
+        audio = np.frombuffer(raw, dtype=np.int32).astype(np.float32) / 2147483648.0
+    elif sampwidth == 1:
+        audio = (np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+    else:
+        raise ValueError(f"sampwidth WAV tidak didukung: {sampwidth}")
+    if n_channels > 1:
+        audio = audio.reshape(-1, n_channels).mean(axis=1)
+    return np.ascontiguousarray(audio, dtype=np.float32)
+
+
+def _preload_cublas():
+    """Preload libcublas.so.12 dari paket nvidia-cublas-cu12 (kalau ada)."""
+    try:
+        import ctypes
+        import glob as _glob
+        import sysconfig
+        base = sysconfig.get_paths().get("purelib", "")
+        for pat in (os.path.join(base, "nvidia", "cublas", "lib", "libcublas.so.12"),
+                    os.path.join(base, "nvidia", "cudnn", "lib", "libcudnn.so.9"),
+                    "/usr/local/cuda/lib64/libcublas.so.12"):
+            for path in _glob.glob(pat):
+                try:
+                    ctypes.CDLL(path)
+                    return True
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return False
+
+
+def _get_model(force_cpu=False):
+    _preload_cublas()
+    from faster_whisper import WhisperModel
+    if force_cpu:
+        log.info("[whisper] pakai CPU int8 (fallback libcublas)")
+        return WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+    try:
+        import torch
+        has_cuda = bool(torch.cuda.is_available())
+    except Exception:
+        has_cuda = False
+    if has_cuda:
+        return WhisperModel(WHISPER_MODEL, device="cuda", compute_type="float16")
+    log.info("[whisper] GPU tidak tersedia, pakai CPU int8")
+    return WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+
+
+def _transcribe_chunk(model, wav_path, start, dur):
+    """Transkrip satu chunk audio, timestamp di-offset ke waktu video.
+
+    Kalau encode GPU gagal karena libcublas.so.12 tidak ditemukan,
+    otomatis ganti ke model CPU int8 dan coba sekali lagi.
+    """
+    global _cpu_model
+    if _cpu_model is not None:
+        model = _cpu_model
+    tmp = wav_path + f".chunk{int(start)}.wav"
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-ss", f"{start:.3f}", "-t", f"{dur:.3f}",
+         "-i", wav_path, tmp],
+        check=True, capture_output=True)
+    try:
+        audio = _load_wav_array(tmp)
+        try:
+            segments, _info = model.transcribe(
+                audio, language=WHISPER_LANG, vad_filter=False,
+                condition_on_previous_text=False, temperature=0.0,
+                beam_size=WHISPER_BEAM, word_timestamps=True)
+        except RuntimeError as e:
+            if "cublas" not in str(e).lower() and "libcublas" not in str(e).lower():
+                raise
+            log.warning("[whisper] libcublas.so.12 tidak ditemukan di GPU, "
+                        "fallback ke CPU int8")
+            _cpu_model = _get_model(force_cpu=True)
+            segments, _info = _cpu_model.transcribe(
+                audio, language=WHISPER_LANG, vad_filter=False,
+                condition_on_previous_text=False, temperature=0.0,
+                beam_size=WHISPER_BEAM, word_timestamps=True)
+        out = []
+        for seg in segments:
+            words = []
+            for w in (seg.words or []):
+                words.append({"start": round(start + float(w.start), 3),
+                              "end": round(start + float(w.end), 3),
+                              "word": str(w.word).strip()})
+            out.append({
+                "start": round(start + float(seg.start), 3),
+                "end": round(start + float(seg.end), 3),
+                "text": str(seg.text).strip(),
+                "words": words,
+                "avg_logprob": float(getattr(seg, "avg_logprob", 0.0) or 0.0),
+            })
+        return out
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def _overlap(a_start, a_end, b_start, b_end):
+    return max(0.0, min(a_end, b_end) - max(a_start, b_start))
+
+
+def _similarity(a, b):
+    if not a or not b:
+        return 0.0
+    return difflib.SequenceMatcher(None, a, b).ratio()
+
+
+def fuse_segments(ocr_segs, whisper_segs):
+    """Gabung OCR + Whisper. Return (fused, stats).
+
+    Teks pakai OCR, timing pakai Whisper (dibatasi WHISPER_MAX_SHIFT).
+    Baris yang hanya ada di Whisper ditambahkan (source="asr").
+    Baris yang hanya ada di OCR dipertahankan (source="ocr").
+    """
+    fused = []
+    used_whisper = set()
+    stats = {"timing_fixed": 0, "whisper_only": 0, "conflict": 0, "ocr_only": 0}
+
+    for o in ocr_segs:
+        o_start, o_end = float(o["start"]), float(o["end"])
+        overlapping = []
+        for wi, w in enumerate(whisper_segs):
+            if _overlap(o_start, o_end, float(w["start"]), float(w["end"])) > 0:
+                overlapping.append((wi, w))
+        if not overlapping:
+            fused.append({**o, "source": "ocr", "conflict": False,
+                          "timing_unverified": True})
+            stats["ocr_only"] += 1
+            continue
+        for wi, _w in overlapping:
+            used_whisper.add(wi)
+        word_times = []
+        whisper_texts = []
+        for _wi, w in overlapping:
+            whisper_texts.append(w.get("text", ""))
+            for wd in (w.get("words") or []):
+                if _overlap(o_start, o_end, wd["start"], wd["end"]) > 0:
+                    word_times.append((wd["start"], wd["end"]))
+        new_start, new_end = o_start, o_end
+        if word_times:
+            ws = min(t[0] for t in word_times)
+            we = max(t[1] for t in word_times)
+            new_start = max(o_start - WHISPER_MAX_SHIFT,
+                            min(o_start + WHISPER_MAX_SHIFT, ws))
+            new_end = max(o_end - WHISPER_MAX_SHIFT,
+                          min(o_end + WHISPER_MAX_SHIFT, we))
+            if new_end - new_start < 0.35:
+                new_end = new_start + 0.35
+            if abs(new_start - o_start) > 0.05 or abs(new_end - o_end) > 0.05:
+                stats["timing_fixed"] += 1
+        whisper_text = " ".join(whisper_texts).strip()
+        conflict = False
+        if whisper_text and _similarity(o.get("text_zh", ""), whisper_text) < 0.5:
+            conflict = True
+            stats["conflict"] += 1
+        fused.append({**o, "start": round(new_start, 3), "end": round(new_end, 3),
+                      "source": "ocr", "conflict": conflict,
+                      "timing_unverified": False})
+
+    for wi, w in enumerate(whisper_segs):
+        if wi in used_whisper:
+            continue
+        if float(w["end"]) - float(w["start"]) < 0.35:
+            continue
+        if not (w.get("text") or "").strip():
+            continue
+        fused.append({"start": float(w["start"]), "end": float(w["end"]),
+                      "text_zh": w["text"].strip(), "bbox": None,
+                      "source": "asr", "conflict": False,
+                      "timing_unverified": False})
+        stats["whisper_only"] += 1
+
+    fused.sort(key=lambda s: (float(s["start"]), float(s["end"])))
+    return fused, stats
+
+
+def whisper_episode(vid_path, dur):
+    """Transkrip satu episode per chunk (checkpoint) -> (whisper_segs, detik)."""
+    stem = os.path.splitext(os.path.basename(vid_path))[0]
+    wav_path = os.path.join(WORK_DIR, "audio", stem + ".wav")
+    _extract_audio(vid_path, wav_path)
+    cdir = os.path.join(CHUNK_DIR, stem)
+    os.makedirs(cdir, exist_ok=True)
+    fp = _whisper_fingerprint()
+    model = _get_model()
+    whisper_segs = []
+    t0 = time.time()
+
+    starts, s = [], 0.0
+    while s < max(dur, 0.1):
+        starts.append(s)
+        s += CHUNK_SECONDS
+    for start in starts:
+        cend = min(start + CHUNK_SECONDS, dur if dur > 0 else start + CHUNK_SECONDS)
+        cpath = os.path.join(cdir, f"whisper_chunk_{int(start):06d}.json")
+        data = None
+        if os.path.exists(cpath):
+            try:
+                with open(cpath, encoding="utf-8") as f:
+                    data = json.load(f)
+                if data.get("fingerprint") != fp:
+                    data = None
+            except Exception:
+                data = None
+        if data is None:
+            got = _transcribe_chunk(model, wav_path, start, cend - start)
+            write_json_atomic(cpath, {"start": start, "end": cend,
+                                      "fingerprint": fp, "segments": got})
+            whisper_segs.extend(got)
+        else:
+            whisper_segs.extend(data.get("segments", []))
+    whisper_segs.sort(key=lambda x: float(x["start"]))
+    t_wh = time.time() - t0
+    log.info("[whisper] %s %d segmen ASR %.1fs (model %s, beam %d)",
+             stem, len(whisper_segs), t_wh, WHISPER_MODEL, WHISPER_BEAM)
+    return whisper_segs, t_wh
+
+
+def parallel_ocr_whisper(vid_path, dur, run_ocr=True, run_whisper=True):
+    """Jalankan OCR dan Whisper berbarengan (2 thread).
+
+    Keduanya CPU-bound, tapi saling mengisi waktu tunggu satu sama lain
+    (extract frame, load model, I/O) sehingga wall time lebih pendek dari
+    jumlah keduanya. Return (ocr_segs, ocr_totals, whisper_segs, t_whisper);
+    bagian yang tidak dijalankan berisi None.
+    """
+    results = {}
+
+    def _ocr():
+        results["ocr"] = extract_segments(vid_path, dur)
+
+    def _wh():
+        results["whisper"] = whisper_episode(vid_path, dur)
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        futs = []
+        if run_ocr:
+            futs.append(ex.submit(_ocr))
+        if run_whisper:
+            futs.append(ex.submit(_wh))
+        for f in futs:
+            f.result()
+    ocr = results.get("ocr", (None, {"extract": 0.0, "ocr": 0.0}))
+    wh = results.get("whisper", (None, 0.0))
+    return ocr[0], ocr[1], wh[0], wh[1]
 
 
 # ───────────────────────── translate ─────────────────────────
@@ -1021,33 +1339,56 @@ def process_episode(vid_path, render):
     out_mp4 = os.path.join(HARDSUB_DIR, f"{stem}_id_hardsub.mp4")
 
     t_start = time.time()
-    timings = {"extract": 0.0, "ocr": 0.0, "translate": 0.0, "render": 0.0}
+    timings = {"extract": 0.0, "ocr": 0.0, "whisper": 0.0, "translate": 0.0, "render": 0.0}
     dur, vw, vh = probe(vid_path)
     log.info("==== %s | %.1fs %dx%d ====", stem, dur, vw, vh)
 
+    payload = None
+    segs = None
     if os.path.exists(ep_json):
-        with open(ep_json, encoding="utf-8") as f:
-            payload = json.load(f)
+        try:
+            with open(ep_json, encoding="utf-8") as f:
+                payload = json.load(f)
+        except Exception:
+            payload = None
         # Resume per episode: cek fingerprint konfigurasi. Kalau berubah,
         # hasil lama tidak dipakai — episode diulang.
-        if payload.get("fingerprint") != fingerprint():
+        if payload is not None and payload.get("fingerprint") != fingerprint():
             log.info("config berubah, ulang OCR: %s", stem)
             payload = None
-        else:
+        elif payload is not None:
             segs = payload.get("segments", [])
             segs, _n_cards = drop_name_cards(segs)
             if _n_cards:
                 log.info("kartu nama dibuang: %d", _n_cards)
-            if not os.path.exists(id_srt) or not os.path.exists(zh_srt):
-                write_srt(segs, zh_srt, "text_zh")
-                write_srt(segs, id_srt, "text_id")
             log.info("pakai hasil OCR sebelumnya: %d segmen", len(segs))
-    else:
-        payload = None
 
-    if payload is None:
-        segs, totals = extract_segments(vid_path, dur)
-        timings.update(totals)
+    # OCR + Whisper jalan paralel (thread). Yang sudah ada di cache dilewati.
+    need_ocr = segs is None
+    need_whisper = not (payload and payload.get("whisper_applied")
+                        and payload.get("whisper_fingerprint") == _whisper_fingerprint())
+    dirty = False
+    if need_ocr or need_whisper:
+        ocr_segs, totals, whisper_segs, t_wh = parallel_ocr_whisper(
+            vid_path, dur, run_ocr=need_ocr, run_whisper=need_whisper)
+        if need_ocr:
+            segs = ocr_segs
+            timings.update(totals)
+            dirty = True
+        if need_whisper and whisper_segs is not None:
+            timings["whisper"] = t_wh
+            segs, fstats = fuse_segments(segs, whisper_segs)
+            log.info("[fusi] timing diperbaiki %d, whisper-only %d, konflik %d, ocr-only %d",
+                     fstats["timing_fixed"], fstats["whisper_only"],
+                     fstats["conflict"], fstats["ocr_only"])
+            payload = payload or {}
+            payload["whisper_applied"] = True
+            payload["whisper_fingerprint"] = _whisper_fingerprint()
+            dirty = True
+
+    # Translate kalau ada segmen yang belum punya text_id (episode baru,
+    # atau segmen Whisper-only hasil fusi).
+    if any(not (s.get("text_id") or "").strip() for s in segs):
         t0 = time.time()
         segs, failed_final = translate_segments(segs)
         timings["translate"] = time.time() - t0
@@ -1057,6 +1398,9 @@ def process_episode(vid_path, render):
             raise RuntimeError(
                 f"translate gagal {len(failed_final)} baris di {stem} "
                 f"(lihat {review_path})")
+        dirty = True
+
+    if dirty:
         segs, _nstats = normalize_segments(segs)
         log.info("normalisasi: dipotong=%d dibuang=%d dibungkus=%d dipecah=%d",
                  _nstats["trimmed"], _nstats["dropped"], _nstats["wrapped"], _nstats["split"])
@@ -1064,7 +1408,13 @@ def process_episode(vid_path, render):
         write_json_atomic(ep_json, {
             "episode": stem, "video_file": os.path.basename(vid_path),
             "duration": round(dur, 3), "width": vw, "height": vh,
-            "fingerprint": fingerprint(), "segments": segs})
+            "fingerprint": fingerprint(),
+            "whisper_applied": bool(payload and payload.get("whisper_applied")),
+            "whisper_fingerprint": (payload or {}).get("whisper_fingerprint"),
+            "segments": segs})
+        write_srt(segs, zh_srt, "text_zh")
+        write_srt(segs, id_srt, "text_id")
+    elif not os.path.exists(id_srt) or not os.path.exists(zh_srt):
         write_srt(segs, zh_srt, "text_zh")
         write_srt(segs, id_srt, "text_id")
 
@@ -1076,8 +1426,9 @@ def process_episode(vid_path, render):
     total = time.time() - t_start
     done = sum(1 for s in segs if s.get("text_id") and s["text_id"] != s.get("text_zh"))
     log.info("== %s selesai: %d segmen (%d diterjemah) total %.1fs | extract=%.1f ocr=%.1f "
-             "translate=%.1f render=%.1f", stem, len(segs), done, total,
-             timings["extract"], timings["ocr"], timings["translate"], timings["render"])
+             "whisper=%.1f translate=%.1f render=%.1f", stem, len(segs), done, total,
+             timings["extract"], timings["ocr"], timings["whisper"],
+             timings["translate"], timings["render"])
     return {"episode": stem, "video_seconds": dur, "segments": len(segs),
             "translated": done, "total": total, **timings}
 
@@ -1180,7 +1531,7 @@ def main():
 
     log.info("=== summary: %d episode, video %.1f menit, wall %.1f menit ===",
              len(results), done_video_sec / 60, (time.time() - t_all) / 60)
-    for k in ("extract", "ocr", "translate", "render"):
+    for k in ("extract", "ocr", "whisper", "translate", "render"):
         log.info("  %-10s %7.1fs", k, sum(r.get(k, 0) for r in results))
     log.info("log lengkap: %s", LOG_FILE)
     return 0

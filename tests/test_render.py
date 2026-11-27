@@ -153,3 +153,69 @@ assert calls7 == [], "baris yang sudah di-polish jangan di-polish lagi"
 assert segs7b[0]["text_id"] == "Aku sudah memutuskannya", segs7b
 del os.environ["TIPROUTER_API_KEY"]
 print("TRANSLATE POLISH CACHE OK")
+
+# --- metode cepat 2026-11-27: FPS 0.5, Whisper small + beam 1, paralel ---
+assert lp.FPS == 0.5, lp.FPS
+assert lp.WHISPER_MODEL == "small", lp.WHISPER_MODEL
+assert lp.WHISPER_BEAM == 1, lp.WHISPER_BEAM
+assert lp._whisper_fingerprint()["model"] == "small"
+assert lp._whisper_fingerprint()["beam_size"] == 1
+print("LOCAL PERF CONFIG OK")
+
+# --- fusi lokal: timing diperbaiki, whisper-only ditambah, konflik ditandai ---
+_ocr = [{"start": 0.0, "end": 2.0, "text_zh": "你好", "bbox": [0.2, 0.66, 0.8, 0.72]}]
+_wh = [{"start": 0.2, "end": 1.8, "text": "你好",
+        "words": [{"start": 0.2, "end": 1.0, "word": "你"}, {"start": 1.0, "end": 1.8, "word": "好"}]},
+       {"start": 3.0, "end": 3.8, "text": "再见", "words": []}]
+_fused, _fstats = lp.fuse_segments(_ocr, _wh)
+assert _fused[0]["start"] == 0.2 and _fused[0]["end"] == 1.8, _fused
+assert _fstats["whisper_only"] == 1 and len(_fused) == 2, (_fstats, _fused)
+assert _fused[1]["source"] == "asr", _fused
+print("LOCAL FUSE OK")
+
+# --- paralel: OCR + Whisper jalan berbarengan, bukan antre ---
+import time as _time
+_calls = []
+def _fake_ocr(vid, dur):
+    _time.sleep(0.4)
+    _calls.append("ocr")
+    return [{"start": 0.0, "end": 1.0, "text_zh": "你好"}], {"extract": 0.1, "ocr": 0.4}
+def _fake_wh(vid, dur):
+    _time.sleep(0.4)
+    _calls.append("whisper")
+    return [], 0.4
+lp.extract_segments, lp.whisper_episode = _fake_ocr, _fake_wh
+_t0 = _time.time()
+_o, _t, _w, _tw = lp.parallel_ocr_whisper("x.mp4", 10.0)
+_wall = _time.time() - _t0
+assert sorted(_calls) == ["ocr", "whisper"], _calls
+assert _wall < 0.7, f"paralel harus < 0.7s, dapat {_wall:.2f}s"
+assert _o[0]["text_zh"] == "你好" and _w == [], (_o, _w)
+print("LOCAL PARALLEL OK", round(_wall, 2), "s")
+
+# --- OCR API: kode memakai API rapidocr-onnxruntime 1.2.3 (text_detector /
+# text_recognizer). Versi 1.4.x menghapus method itu — install tanpa pin
+# pernah merusak run lokal 2026-11-27. Tes ini menangkap itu lebih awal.
+import importlib.util as _ilu
+if _ilu.find_spec("rapidocr_onnxruntime") is not None:
+    from rapidocr_onnxruntime import RapidOCR as _ROCR
+    _eng = _ROCR()
+    for _m in ("text_detector", "text_recognizer", "sorted_boxes", "get_crop_img_list"):
+        assert hasattr(_eng, _m), f"RapidOCR tanpa {_m} — cek pin rapidocr-onnxruntime==1.2.3"
+    import numpy as _np
+    _img = _np.full((120, 400, 3), 255, dtype=_np.uint8)
+    _res = lp.ocr_batch(_eng, [(_img, 400, 120)])
+    assert isinstance(_res, list) and len(_res) == 1, _res
+    print("LOCAL OCR API OK")
+else:
+    print("LOCAL OCR API SKIP (rapidocr tidak terpasang)")
+
+# --- fingerprint JSON round-trip (bug 2026-11-27): roi tuple vs list.
+# fingerprint() lama mengembalikan ROI sebagai tuple; setelah ditulis ke
+# JSON lalu dibaca lagi jadi list, perbandingan selalu gagal dan OCR
+# selalu diulang walau config tidak berubah.
+_fp = lp.fingerprint()
+import json as _json2
+assert _json2.loads(_json2.dumps(_fp)) == _fp, _fp
+assert isinstance(_fp["roi"], list), _fp
+print("LOCAL FINGERPRINT ROUNDTRIP OK")

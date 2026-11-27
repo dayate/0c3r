@@ -5,7 +5,7 @@
 
 ## 1. Kesimpulan utama
 
-1. **Kecepatan Whisper bukan risiko utama.** Model `large-v3-turbo` sudah cukup cepat; risiko sebenarnya ada di *overhead di sekitar model*: alokasi VM Colab, cold download model 1,6 GB, upload/download file.
+1. **Kecepatan Whisper bukan risiko utama — sejak metode cepat 2026-11-27, Whisper memakai model `small` + beam 1 (greedy) karena hanya untuk timing, bukan transkrip utama.** Model `small` ~4-6x lebih cepat dari `large-v3-turbo` di CPU; risiko sebenarnya ada di *overhead di sekitar model*: alokasi VM Colab, cold download model, upload/download file.
 2. **Jalur 3 (hardsub) bukan dibatasi model OCR, tapi dibatasi cara frame diproses.** Inferensi satu frame per panggilan + decode sekuensial adalah biang kelambatan, bukan akurasi model.
 3. **Jalur 1 (softsub) paling rapuh di lingkungan cloud.** IP datacenter memicu bot-check YouTube; tanpa `curl_cffi` caption body kembali kosong tanpa error.
 4. **`BatchedInferencePipeline` memberi ~3x speedup tapi menurunkan kualitas** pada audio tertentu (segmen hilang, bahasa berpindah di tengah segmen).

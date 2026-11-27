@@ -12,11 +12,18 @@ Aturan (audio dan hardsub sama-sama Mandarin):
   segmen ditandai conflict=True, teks OCR tetap dipakai, masuk review.
 - Cell ini boleh dilewati: kalau dilewati, timing tetap memakai OCR.
 
-Setting Whisper (terbukti di tes 24-25 Nov):
-  model large-v3-turbo, compute_type float16 di GPU (fallback int8 di CPU),
-  language="zh" dikunci, vad_filter=False,
-  condition_on_previous_text=False, temperature=0.0, beam_size=5,
+Setting Whisper (metode cepat 2026-11-27):
+  model "small" (default dari cell config), compute_type float16 di GPU
+  (fallback int8 di CPU), language="zh" dikunci, vad_filter=False,
+  condition_on_previous_text=False, temperature=0.0, beam_size=1 (greedy),
   word_timestamps=True.
+  Whisper HANYA dipakai buat timing + cadangan, teks tetap dari OCR —
+  jadi model kecil sudah cukup (4-6x lebih cepat dari large-v3-turbo
+  di CPU). large-v3-turbo tetap tersedia lewat WHISPER_MODEL di config
+  kalau butuh akurasi penuh.
+  Di Colab cell ini jalan setelah cell OCR (berurutan); paralel
+  OCR+Whisper hanya di pipeline lokal (ThreadPoolExecutor) — di GPU
+  Whisper sudah cepat jadi antrean ini tidak terasa.
 """
 import difflib
 import glob
@@ -30,8 +37,11 @@ import wave
 
 import numpy as np
 
-WHISPER_MODEL = "large-v3-turbo"
-WHISPER_LANG = "zh"
+# Nilai dari cell config kalau ada; default di sini supaya cell ini tetap
+# bisa jalan sendiri (mis. sesi baru yang cell confignya belum diubah).
+WHISPER_MODEL = globals().get("WHISPER_MODEL", "small")
+WHISPER_BEAM = globals().get("WHISPER_BEAM", 1)
+WHISPER_LANG = globals().get("WHISPER_LANG", "zh")
 WHISPER_MAX_SHIFT = 1.5  # detik, batas geser timing OCR ke timing Whisper
 
 
@@ -86,7 +96,7 @@ def _whisper_fingerprint():
         "vad_filter": False,
         "condition_on_previous_text": False,
         "temperature": 0.0,
-        "beam_size": 5,
+        "beam_size": WHISPER_BEAM,
         "word_timestamps": True,
         "chunk_seconds": CHUNK_SECONDS,
     }
@@ -196,7 +206,7 @@ def _transcribe_chunk(model, wav_path, start, dur):
             segments, _info = model.transcribe(
                 audio, language=WHISPER_LANG, vad_filter=False,
                 condition_on_previous_text=False, temperature=0.0,
-                beam_size=5, word_timestamps=True)
+                beam_size=WHISPER_BEAM, word_timestamps=True)
         except RuntimeError as e:
             if "cublas" not in str(e).lower() and "libcublas" not in str(e).lower():
                 raise
@@ -206,7 +216,7 @@ def _transcribe_chunk(model, wav_path, start, dur):
             segments, _info = _cpu_model.transcribe(
                 audio, language=WHISPER_LANG, vad_filter=False,
                 condition_on_previous_text=False, temperature=0.0,
-                beam_size=5, word_timestamps=True)
+                beam_size=WHISPER_BEAM, word_timestamps=True)
         out = []
         for seg in segments:
             words = []

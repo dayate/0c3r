@@ -45,7 +45,9 @@ def get_engine():
 
 
 def fingerprint():
-    return {"fps": FPS, "roi": ROI, "min_conf": MIN_CONF, "upscale": UPSCALE,
+    # roi harus list (bukan tuple) supaya sama setelah JSON round-trip;
+    # kalau tuple, resume chunk/episode tidak pernah cocok dan OCR selalu ulang.
+    return {"fps": FPS, "roi": list(ROI), "min_conf": MIN_CONF, "upscale": UPSCALE,
             "max_width": MAX_WIDTH, "gate": TEXT_GATE, "gate_min": TEXT_GATE_MIN_BRIGHT}
 
 

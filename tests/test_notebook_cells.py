@@ -179,3 +179,20 @@ assert "luma_radius=14" in _fc and "luma_power=3" in _fc, _fc
 assert "between(t,0.100,1.900)" in _fc, _fc
 print("CELL BLUR DYNAMIC OK")
 
+
+# Metode cepat 2026-11-27: Whisper "small" + beam 1 (dari cell config),
+# bukan large-v3-turbo beam 5. Cell tetap bisa jalan sendiri (default small).
+assert g["WHISPER_MODEL"] == "small", g["WHISPER_MODEL"]
+assert g["WHISPER_BEAM"] == 1, g["WHISPER_BEAM"]
+assert g["_whisper_fingerprint"]()["model"] == "small"
+assert g["_whisper_fingerprint"]()["beam_size"] == 1
+assert g["FPS"] == 0.5, g["FPS"]
+print("CELL WHISPER SMALL OK")
+
+# Fingerprint JSON round-trip (bug 2026-11-27, sama seperti lokal):
+# roi tuple bikin resume chunk/episode di cell OCR tidak pernah cocok.
+import json as _json
+_fp = g["fingerprint"]()
+assert _json.loads(_json.dumps(_fp)) == _fp, _fp
+assert isinstance(_fp["roi"], list), _fp
+print("CELL FINGERPRINT ROUNDTRIP OK")

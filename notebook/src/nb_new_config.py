@@ -6,7 +6,9 @@ BASE_OUT_DIR = "/content/drive/MyDrive/duanju/suba_hardsub"
 MAX_EPISODES = 200
 
 # --- Parameter OCR ---
-FPS = 1                 # sampling; 0.5 lebih cepat, timing subtitle kasar
+FPS = 0.5               # sampling; 0.5 lebih cepat, timing kasar diperbaiki
+                        # fusi Whisper (1 fps hanya kalau butuh presisi OCR
+                        # mentah tanpa Whisper)
 ROI = (0.05, 0.62, 0.95, 0.93)   # (x_min, y_min, x_max, y_max) rasio 0.0 - 1.0
 MIN_CONF = 0.65
 UPSCALE = 2             # 1080p+up2 seakurat 960+up3, 1.6x lebih cepat
@@ -16,6 +18,15 @@ MIN_DUR = 0.35          # segmen lebih pendek dari ini dibuang
 TEXT_GATE = True        # skip frame tanpa teks putih terang (hemat ~70% OCR)
 TEXT_GATE_MIN_BRIGHT = 0.05
 CHUNK_SECONDS = 600     # checkpoint OCR per chunk, aman di-interrupt
+
+# --- Parameter Whisper (timing) ---
+# Whisper HANYA dipakai buat timing + cadangan; teks tetap dari OCR.
+# Karena itu model kecil sudah cukup: "small" ~4-6x lebih cepat dari
+# large-v3-turbo di CPU, timing kata-nya tetap rapat. Kalau butuh akurasi
+# penuh, ganti ke "large-v3-turbo" (lebih lambat, download ~1,6 GB).
+WHISPER_MODEL = "small"
+WHISPER_BEAM = 1        # 1 = greedy, tercepat (beam 5 sedikit lebih akurat)
+WHISPER_LANG = "zh"
 
 # --- Parameter Blur & Hardsub ---
 # "static"  = 1 band vertikal FIXED + time-gate (blur hanya nyala saat ada teks) -> murah
