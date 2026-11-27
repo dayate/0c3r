@@ -6,11 +6,14 @@ Profil per device (profiles.yaml): --profile colab (default) atau kaggle.
   (sudah ada di image Kaggle), path /kaggle/input + /kaggle/working.
 Profil lain (pc/vm/instabox) hanya untuk local_pipeline.py, bukan notebook.
 
-Generator menyuntik isi profiles.yaml ke cell konfigurasi (PROFILES) dan
-nama profil terpilih (PROFILE), jadi notebook hasil build tetap 1 file
-yang bisa di-upload langsung.
+Isi profiles.yaml disuntik ke cell profil tersendiri (PROFILES, pretty-print)
+dan nama profil terpilih ke cell konfigurasi (PROFILE), jadi notebook hasil
+build tetap 1 file yang bisa di-upload langsung. Cell konfigurasi tidak lagi
+membawa dict PROFILES yang panjang; kalau cell profil dilewati saat run,
+config jatuh ke default colab (sama seperti menjalankan src mentah).
+Judul section dibuat sebagai markdown cell, bukan code cell berisi komentar.
 """
-import argparse, json, os
+import argparse, json, os, pprint
 
 try:
     import yaml
@@ -65,17 +68,26 @@ def main():
                 else "kaggle-suba-hardsub-v2.ipynb")
     out = args.out or os.path.join(HERE, out_name)
 
-    # Suntik profil ke cell konfigurasi (tetap 1 file, tanpa file tambahan).
-    # repr (bukan json.dumps): dict Python butuh True/False, JSON pakai true/false.
+    # Cell profil tersendiri: dict lengkap (defaults sudah digabung), ditulis
+    # multi-baris supaya enak dibaca; cell config tinggal memakai PROFILES.
+    # pprint (bukan json.dumps): dict Python butuh True/False, JSON pakai true/false.
+    profiles_src = (
+        "# Profil per device — dibuat otomatis dari profiles.yaml, jangan edit manual.\n"
+        "# Ganti profil lewat PROFILE di cell konfigurasi berikut.\n"
+        "PROFILES = " + pprint.pformat(profiles, indent=1, width=100, sort_dicts=False)
+    )
+
+    # Cell konfigurasi: PROFILE disuntik; PROFILES diambil dari cell profil
+    # kalau sudah di-run, kalau belum jatuh ke {} (= default colab di bawah).
     config = code("nb_new_config.py")
     config = config.replace('PROFILE = "colab"  # __PROFILE_NAME__',
                             f'PROFILE = "{args.profile}"')
     config = config.replace("PROFILES = {}  # __PROFILES_JSON__",
-                            "PROFILES = " + repr(profiles))
+                            "PROFILES = globals().get(\"PROFILES\", {})  # dari cell profil di atas")
 
     if prof.get("mount_drive"):
         first_cells = [
-            c("## 1 — Mount Google Drive"),
+            c("## 1 — Mount Google Drive", "md"),
             c("from google.colab import drive\ndrive.mount('/content/drive')\nprint('Google Drive berhasil di-mount!')"),
         ]
         install = code("nb_new_install.py")
@@ -96,26 +108,27 @@ def main():
         c(code("nb_new_md0.md").replace("(Colab GPU)", "(Kaggle GPU)")
           if args.profile == "kaggle" else code("nb_new_md0.md"), "md"),
         *first_cells,
-        c("## 2 — Install Dependensi & Font Pendukung"),
+        c("## 2 — Install Dependensi & Font Pendukung", "md"),
         c(install),
-        c("## 3 — Konfigurasi Utama"),
+        c("## 3 — Konfigurasi Utama", "md"),
+        c(profiles_src),
         c(config),
-        c("## 3b — Validator SRT"),
+        c("## 3b — Validator SRT", "md"),
         c(code("nb_new_validate.py")),
-        c("## 3c — Tuning OCR (GUI, jalankan sebelum OCR)"),
+        c("## 3c — Tuning OCR (GUI, jalankan sebelum OCR)", "md"),
         c(code("nb_new_tune.py")),
         c(code("nb_new_md7.md"), "md"),
-        c("## 4 — OCR (Mandarin)"),
+        c("## 4 — OCR (Mandarin)", "md"),
         c(code("nb_new_ocr.py")),
-        c("## 4b — Whisper Timing + Fusi (cell terpisah, boleh dilewati)"),
+        c("## 4b — Whisper Timing + Fusi (cell terpisah, boleh dilewati)", "md"),
         c(code("nb_new_whisper.py")),
-        c("## 5 — Translate (Gratis dulu, LLM fallback)"),
+        c("## 5 — Translate (Gratis dulu, LLM fallback)", "md"),
         c(code("nb_new_translate.py")),
-        c("## 6 — Blur Hardsub + Burn Subtitle Indonesia"),
+        c("## 6 — Blur Hardsub + Burn Subtitle Indonesia", "md"),
         c(code("nb_new_render.py")),
-        c("## 7 — Merge Seluruh Subtitle (.SRT) Lengkap"),
+        c("## 7 — Merge Seluruh Subtitle (.SRT) Lengkap", "md"),
         c(code("nb_new_merge_srt.py")),
-        c("## 8 — Merge Seluruh Episode Video (Sudah Hardsub ID) Jadi 1 File Utuh (Opsional)"),
+        c("## 8 — Merge Seluruh Episode Video (Sudah Hardsub ID) Jadi 1 File Utuh (Opsional)", "md"),
         c(code("nb_new_merge_vid.py")),
     ]
 

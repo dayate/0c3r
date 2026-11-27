@@ -212,8 +212,9 @@ assert _json.loads(_json.dumps(_fp)) == _fp, _fp
 assert isinstance(_fp["roi"], list), _fp
 print("CELL FINGERPRINT ROUNDTRIP OK")
 
-# Profil di notebook (2026-11-27): generator menyuntik PROFILES + PROFILE
-# ke cell config; varian kaggle tanpa mount Drive.
+# Profil di notebook (2026-11-27): generator menyuntik PROFILES ke cell profil
+# tersendiri (pretty-print) + PROFILE ke cell config; judul section jadi
+# markdown cell; varian kaggle tanpa mount Drive.
 import subprocess as _sp
 for _prof, _out in (("colab", "colab-suba-hardsub-v2.ipynb"),
                     ("kaggle", "kaggle-suba-hardsub-v2.ipynb")):
@@ -221,11 +222,23 @@ for _prof, _out in (("colab", "colab-suba-hardsub-v2.ipynb"),
                  capture_output=True, text=True, cwd=BASE)
     assert _r.returncode == 0, _r.stderr
     _nb = json.load(open(os.path.join(BASE, "notebook", _out), encoding="utf-8"))
-    # colab 24 cell; kaggle 23 (langkah mount Drive jadi 1 cell markdown).
-    assert len(_nb["cells"]) == (24 if _prof == "colab" else 23), len(_nb["cells"])
+    # colab 25 cell; kaggle 24 (langkah mount Drive jadi 1 cell markdown).
+    assert len(_nb["cells"]) == (25 if _prof == "colab" else 24), len(_nb["cells"])
+    # Judul section harus markdown cell, bukan code cell berisi komentar.
+    _headers = [c for c in _nb["cells"]
+                if "".join(c.get("source", [])).startswith("## ")]
+    assert _headers, "tidak ada cell judul"
+    assert all(c["cell_type"] == "markdown" for c in _headers), [
+        "".join(c.get("source", [])).split("\n")[0] for c in _headers
+        if c["cell_type"] != "markdown"]
     _srcs = ["".join(c.get("source", [])) for c in _nb["cells"]]
+    # Cell profil tersendiri (dict lengkap), cell config tinggal memakai PROFILES.
+    _prof_src = next(s for s in _srcs if "PROFILES = {" in s)
     _cfg_src = next(s for s in _srcs if "PROFILES" in s and "EPISODES_DIR" in s)
+    assert "PROFILES = {" not in _cfg_src, "config cell masih membawa dict PROFILES"
+    assert "globals().get(\"PROFILES\", {})" in _cfg_src, "guard PROFILES hilang"
     _g2 = {"__name__": "__main__"}
+    exec(compile(_prof_src, "profiles-" + _prof, "exec"), _g2)
     exec(compile(_cfg_src, "config-" + _prof, "exec"), _g2)
     assert set(_g2["PROFILES"]) == {"colab", "kaggle", "pc", "vm", "instabox"}
     assert "termux" not in _g2["PROFILES"]

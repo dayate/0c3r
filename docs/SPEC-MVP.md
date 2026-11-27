@@ -32,7 +32,7 @@ Colab, dengan komputasi di GPU remote (Colab T4).
 | D10 | Privasi | File sumber hanya untuk pemrosesan; tidak untuk training |
 | D11 | Mesin OCR | RapidOCR (bukan PaddleOCR) |
 | D12 | Blur | `static` dan `dynamic` tetap tersedia sebagai opsi; default `dynamic` (radius 20, power 3, jendela ±0,4 detik) sejak 2026-11-27 — band statis meninggalkan bayangan glyph di latar gelap dan mengaburkan wajah di area tanpa teks |
-| D13 | Profil per device | Satu kode, setting per device di `profiles.yaml` (colab, kaggle, pc, vm, instabox — Termux sengaja tidak ada, tidak direkomendasikan). Notebook: pilih PROFILE di cell config, atau `build_colab_nb.py --profile kaggle` (Colab 24 cell, Kaggle 23 cell). Lokal: `local_pipeline.py --profile pc`. Ganti profil = fingerprint berubah = cache/checkpoint lama tidak dipakai |
+| D13 | Profil per device | Satu kode, setting per device di `profiles.yaml` (colab, kaggle, pc, vm, instabox — Termux sengaja tidak ada, tidak direkomendasikan). Notebook: pilih PROFILE di cell config, atau `build_colab_nb.py --profile kaggle` (Colab 25 cell, Kaggle 24 cell; judul section jadi markdown cell, PROFILES di cell tersendiri yang pretty-print). Lokal: `local_pipeline.py --profile pc`. Ganti profil = fingerprint berubah = cache/checkpoint lama tidak dipakai |
 
 ## 3. Ruang lingkup MVP
 
