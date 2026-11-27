@@ -26,6 +26,9 @@ import re
 import shutil
 import subprocess
 import time
+import wave
+
+import numpy as np
 
 WHISPER_MODEL = "large-v3-turbo"
 WHISPER_LANG = "zh"
@@ -113,6 +116,32 @@ def _get_model():
     return WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
 
 
+def _load_wav_array(path):
+    """Baca WAV ke float32 ndarray (mono, -1.0..1.0).
+
+    Jangan serahkan path WAV ke faster-whisper: versi 1.2.1 + PyAV 19
+    crash di decode_audio -> av.open(..., metadata_errors="ignore")
+    karena PyAV 19 tidak lagi menerima argumen itu. Membaca WAV
+    langsung dengan stdlib wave + numpy melewati jalur itu.
+    """
+    with wave.open(path, "rb") as wf:
+        n_channels = wf.getnchannels()
+        sampwidth = wf.getsampwidth()
+        n_frames = wf.getnframes()
+        raw = wf.readframes(n_frames)
+    if sampwidth == 2:
+        audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    elif sampwidth == 4:
+        audio = np.frombuffer(raw, dtype=np.int32).astype(np.float32) / 2147483648.0
+    elif sampwidth == 1:
+        audio = (np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+    else:
+        raise ValueError(f"sampwidth WAV tidak didukung: {sampwidth}")
+    if n_channels > 1:
+        audio = audio.reshape(-1, n_channels).mean(axis=1)
+    return np.ascontiguousarray(audio, dtype=np.float32)
+
+
 def _transcribe_chunk(model, wav_path, start, dur):
     """Transkrip satu chunk audio, timestamp di-offset ke waktu video."""
     tmp = wav_path + f".chunk{int(start)}.wav"
@@ -121,8 +150,9 @@ def _transcribe_chunk(model, wav_path, start, dur):
          "-i", wav_path, tmp],
         check=True, capture_output=True)
     try:
+        audio = _load_wav_array(tmp)
         segments, _info = model.transcribe(
-            tmp, language=WHISPER_LANG, vad_filter=False,
+            audio, language=WHISPER_LANG, vad_filter=False,
             condition_on_previous_text=False, temperature=0.0,
             beam_size=5, word_timestamps=True)
         out = []

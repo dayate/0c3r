@@ -48,6 +48,18 @@ assert _fused[0]["start"] == 0.2 and _fused[0]["end"] == 1.8, _fused
 assert _stats["whisper_only"] == 1 and len(_fused) == 2, (_stats, _fused)
 print("CELL WHISPER FUSE OK")
 
+# _load_wav_array: WAV 16k mono -> float32, tanpa lewat PyAV decode_audio
+# (faster-whisper 1.2.1 + PyAV 19 crash di av.open metadata_errors)
+import wave as _wave, struct as _struct
+_wav = os.path.join(td, "t.wav")
+with _wave.open(_wav, "wb") as _wf:
+    _wf.setnchannels(1); _wf.setsampwidth(2); _wf.setframerate(16000)
+    _wf.writeframes(_struct.pack("<16000h", *([1000] * 16000)))
+_arr = g["_load_wav_array"](_wav)
+assert _arr.dtype.name == "float32" and _arr.shape == (16000,), _arr.shape
+assert abs(float(_arr[0]) - 1000 / 32768.0) < 1e-6
+print("CELL WHISPER WAV OK")
+
 g["MAX_EPISODES"] = 200
 ep_json = os.path.join(out, "per_episode", stem + "_ocr.json")
 segs = [
