@@ -77,12 +77,15 @@ MIN_DUR = 0.35          # segmen lebih pendek dari ini dibuang
 TEXT_GATE = True
 TEXT_GATE_MIN_BRIGHT = 0.05  # persen pixel sangat terang di ROI
 
-BLUR_RADIUS = 12        # blur statis band subtitle; 15+ mulai merusak background
+BLUR_RADIUS = 20        # 12 terlalu lemah: glyph putih di latar gelap masih
+                        # kelihatan sebagai bercak; 20 + power 3 menghilangkannya
+BLUR_TIME_PAD = 0.4     # dynamic: jendela blur diperlebar ±0.4 detik supaya
+                        # tidak miss kalau timing OCR meleset sedikit
 BLUR_PAD_X = 0.02
 BLUR_PAD_Y = 0.012
 # static  = satu band vertikal fixed + time-gate (hanya nyala saat ada teks) -> cepat, CPU
 # dynamic = box per segmen, presisi maksimal -> N crop+blur+overlay, butuh GPU/Colab
-BLUR_MODE = "static"
+BLUR_MODE = "dynamic"
 # True: band blur selalu nyala -> subtitle Mandarin yang tidak terdeteksi OCR tidak bocor
 ALWAYS_BLUR = True
 PROGRESS_PCT = 10       # print progress ffmpeg tiap N persen
@@ -93,6 +96,7 @@ LLM_MODELS = ["auto", "deepseek-v4.1-flash-1017"]  # diuji: hanya ini yang terse
 LLM_BATCH = 20          # segmen per request
 LLM_TIMEOUT = 180
 FREE_DELAY = 0.5        # jeda antar request translator gratis
+POLISH_WITH_LLM = True  # polish baris MyMemory/Google lewat LLM (butuh TIPROUTER_API_KEY)
 
 MAX_OUTPUT_MB = 0       # 0 = nonaktif; >0 = peringatan keras di log kalau output lebih besar
 
@@ -509,6 +513,9 @@ def extract_segments(vid_path, dur):
             segs.extend(data.get("segments", []))
 
     segs.sort(key=lambda x: x["start"])
+    segs, n_cards = drop_name_cards(segs)
+    if n_cards:
+        log.info("[ocr] kartu nama dibuang: %d", n_cards)
     return segs, totals
 
 
@@ -542,11 +549,11 @@ def _strip_json(txt):
     return txt[i:j + 1] if i >= 0 and j > i else txt
 
 
-def llm_translate(lines):
+def llm_translate(lines, system=None):
     api_key = (os.environ.get("TIPROUTER_API_KEY") or "").strip()
     if not api_key:
         return None
-    system = ("Kamu penerjemah subtitle drama Mandarin ke bahasa Indonesia. "
+    system = system or ("Kamu penerjemah subtitle drama Mandarin ke bahasa Indonesia. "
               "Terjemahkan tiap baris secara natural dan ringkas, jangan menambah penjelasan. "
               "Balas HANYA JSON array of string, jumlah dan urutan sama dengan input.")
     body = {"temperature": 0.2,
@@ -627,6 +634,52 @@ def llm_translate_single(text):
     return None
 
 
+def _clean_id(text):
+    """Bersihkan hasil terjemah: buang tanda kutip yang membungkus seluruh
+    baris dan spasi ganda. Makna tidak diubah."""
+    text = (text or "").strip()
+    if len(text) >= 2 and text[0] in "\"“”'" and text[-1] in "\"“”'":
+        text = text[1:-1].strip()
+    return " ".join(text.split())
+
+
+def llm_polish(lines):
+    """Polish terjemahan Indonesia supaya natural seperti dialog drama."""
+    system = ("Kamu editor subtitle drama. Perbaiki terjemahan Indonesia ini "
+              "supaya natural seperti dialog sehari-hari, jangan kaku, jangan "
+              "ubah makna, jangan tambah atau buang informasi, jangan tambah "
+              "tanda kutip. Balas HANYA JSON array of string, jumlah dan "
+              "urutan sama dengan input.")
+    return llm_translate(lines, system=system)
+
+
+def is_name_card(text, bbox):
+    """True kalau segmen ini kartu nama/peran, bukan dialog (lihat OCR)."""
+    if not text or not bbox:
+        return False
+    x0, y0, x1, y1 = bbox
+    w, h = x1 - x0, y1 - y0
+    if h <= 0 or w >= 0.6 * h or h < 0.10:
+        return False
+    role_words = ("总裁", "董事长", "总经理", "副总裁", "集团", "董事", "总裁夫人")
+    if any(k in text for k in role_words):
+        return True
+    if len(text.strip()) <= 4:
+        return True
+    return False
+
+
+def drop_name_cards(segs):
+    """Buang segmen kartu nama/peran dari daftar. Return (segs_baru, jumlah)."""
+    kept, dropped = [], 0
+    for s in segs:
+        if is_name_card(s.get("text_zh") or "", s.get("bbox")):
+            dropped += 1
+            continue
+        kept.append(s)
+    return kept, dropped
+
+
 def translate_segments(segs):
     """Gratis dulu (DeepL -> Google -> MyMemory), sisa gagal baru LLM batch,
     lalu LLM per baris. Return (segs, failed_list).
@@ -644,18 +697,21 @@ def translate_segments(segs):
             todo.append(zh)
 
     uniq = list(dict.fromkeys(todo))
-    stats = {"deepl": 0, "google": 0, "mymemory": 0, "llm": 0}
+    stats = {"deepl": 0, "google": 0, "mymemory": 0, "llm": 0, "polish": 0}
+    prov_of = {}
     failed = []
     for n, zh in enumerate(uniq, 1):
         out = deepl_translate(zh)
         if out and out != zh:
             _cache[zh] = out
             stats["deepl"] += 1
+            prov_of[zh] = "deepl"
             continue
         out, prov = google_translate(zh)
         if out and out != zh:
             _cache[zh] = out
             stats[prov] += 1
+            prov_of[zh] = prov
         else:
             failed.append(zh)
         if n % 10 == 0:
@@ -688,11 +744,31 @@ def translate_segments(segs):
                 save_cache()
         save_cache()
 
+    # Polish LLM: baris dari MyMemory/Google ditulis ulang supaya natural.
+    if POLISH_WITH_LLM and (os.environ.get("TIPROUTER_API_KEY") or "").strip():
+        cands = [zh for zh in uniq
+                 if prov_of.get(zh) in ("mymemory", "google")
+                 and _cache.get(zh) and not has_mandarin(_cache[zh])]
+        if cands:
+            log.info("[tr] polish LLM %d baris (MyMemory/Google)", len(cands))
+            for i in range(0, len(cands), LLM_BATCH):
+                chunk = cands[i:i + LLM_BATCH]
+                out = llm_polish([_cache[zh] for zh in chunk])
+                if out:
+                    for zh, id_ in zip(chunk, out):
+                        old = _cache[zh]
+                        if (id_ and id_ != old and not has_mandarin(id_)
+                                and 0.5 * len(old) <= len(id_) <= 2.0 * len(old)):
+                            _cache[zh] = _clean_id(id_)
+                            stats["polish"] += 1
+                log.info("[tr] polish %d/%d", min(i + LLM_BATCH, len(cands)), len(cands))
+            save_cache()
+
     for s in segs:
         zh = (s.get("text_zh") or "").strip()
         if zh:
             cand = _cache.get(zh)
-            s["text_id"] = cand if (cand and not has_mandarin(cand)) else ""
+            s["text_id"] = _clean_id(cand) if (cand and not has_mandarin(cand)) else ""
 
     done = sum(1 for s in segs if s.get("text_id"))
     failed_final = [{"start": s.get("start"), "end": s.get("end"),
@@ -700,9 +776,9 @@ def translate_segments(segs):
                      "reason": "all_providers_failed"}
                     for s in segs
                     if (s.get("text_zh") or "").strip() and not s.get("text_id")]
-    log.info("[tr] DeepL=%d Google=%d MyMemory=%d LLM=%d gagal=%d | %d/%d segmen",
+    log.info("[tr] DeepL=%d Google=%d MyMemory=%d LLM=%d polish=%d gagal=%d | %d/%d segmen",
              stats["deepl"], stats["google"], stats["mymemory"], stats["llm"],
-             len(failed_final), done, len(segs))
+             stats["polish"], len(failed_final), done, len(segs))
     return segs, failed_final
 
 
@@ -791,8 +867,8 @@ def build_blur(segs, band, vw, vh, mode):
     False -> hanya pada window tiap segmen. dynamic: rect per segmen (paling presisi)."""
     def blur(h):
         r = max(2, min(BLUR_RADIUS, h // 2 - 1))
-        return (f"boxblur=luma_radius={r}:luma_power=2:"
-                f"chroma_radius={max(1, r // 2)}:chroma_power=1")
+        return (f"boxblur=luma_radius={r}:luma_power=3:"
+                f"chroma_radius={max(1, r // 2)}:chroma_power=2")
 
     if mode == "dynamic":
         chain, cur = [], "[0:v]"
@@ -802,15 +878,23 @@ def build_blur(segs, band, vw, vh, mode):
             _, fy, _, fh = _rect(band, vw, vh)
         for i, s in enumerate(segs):
             b = s.get("bbox")
-            if not b:
+            if b:
+                x, y, w, h = _rect(b, vw, vh)
+                _px = max(4, int(BLUR_PAD_X * vw))
+                x = max(0, x - _px)
+                w = min(vw - x, w + 2 * _px)
+                if fy is not None:
+                    y, h = fy, fh
+                    w = max(16, min(x + w, vw) - x)
+            elif band:
+                x, y, w, h = _rect(band, vw, vh)
+            else:
                 continue
-            x, y, w, h = _rect(b, vw, vh)
-            if fy is not None:
-                y, h = fy, fh
-                w = max(16, min(x + w, vw) - x)
+            t0 = max(0.0, float(s["start"]) - BLUR_TIME_PAD)
+            t1 = float(s["end"]) + BLUR_TIME_PAD
             chain.append(
                 f"{cur}split=2[bi{i}][vm{i}];[bi{i}]crop={w}:{h}:{x}:{y},{blur(h)}[bb{i}];"
-                f"[vm{i}][bb{i}]overlay={x}:{y}:enable='between(t,{s['start']},{s['end']})'[o{i}]")
+                f"[vm{i}][bb{i}]overlay={x}:{y}:enable='between(t,{t0:.3f},{t1:.3f})'[o{i}]")
             cur = f"[o{i}]"
         return (";".join(chain), cur) if chain else (None, None)
 
@@ -934,6 +1018,9 @@ def process_episode(vid_path, render):
             payload = None
         else:
             segs = payload.get("segments", [])
+            segs, _n_cards = drop_name_cards(segs)
+            if _n_cards:
+                log.info("kartu nama dibuang: %d", _n_cards)
             if not os.path.exists(id_srt) or not os.path.exists(zh_srt):
                 write_srt(segs, zh_srt, "text_zh")
                 write_srt(segs, id_srt, "text_id")

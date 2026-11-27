@@ -93,3 +93,45 @@ assert lp.validate_segments(fixed) == [], lp.validate_segments(fixed)
 assert all(len(l) <= 42 for s in fixed for l in (s["text_id"] or "").split("\n"))
 assert nstats["trimmed"] >= 2 and nstats["wrapped"] >= 1, nstats
 print("NORMALIZE OK", nstats)
+
+# --- kartu nama/peran bukan dialog ---
+card = {"start": 119.0, "end": 121.0, "text_zh": "丰宸集团总裁",
+        "bbox": [0.05, 0.50, 0.12, 0.65]}
+assert lp.is_name_card(card["text_zh"], card["bbox"]), "kartu jabatan vertikal harus dikenali"
+assert lp.is_name_card("韩沐宸", [0.05, 0.50, 0.10, 0.62]), "nama vertikal pendek harus dikenali"
+assert not lp.is_name_card("你好吗", [0.2, 0.66, 0.8, 0.72]), "dialog horizontal jangan ikut terbuang"
+assert not lp.is_name_card("我是他的助理", [0.2, 0.66, 0.8, 0.72]), "dialog berisi kata jabatan tapi horizontal jangan dibuang"
+kept, n_cards = lp.drop_name_cards([card, good[0]])
+assert n_cards == 1 and len(kept) == 1, (n_cards, kept)
+print("NAME CARD OK")
+
+# --- blur dynamic: jendela ber-padding, radius/power baru, segmen tanpa bbox pakai band ---
+# (radius config 20, tapi dibatasi setengah tinggi crop: 32px -> 15)
+assert lp.BLUR_RADIUS == 20
+lp.ALWAYS_BLUR = True
+fc_dyn, _ = lp.build_blur(segs, band, 640, 360, "dynamic")
+assert "luma_radius=15" in fc_dyn and "luma_power=3" in fc_dyn, fc_dyn
+assert "between(t,0.100,1.900)" in fc_dyn, fc_dyn  # 0.5-0.4 s/d 1.5+0.4 s
+no_bbox = [{"start": 0.5, "end": 1.5, "text_zh": "你好", "text_id": "Halo"}]
+fc_nb, _ = lp.build_blur(no_bbox, band, 640, 360, "dynamic")
+assert fc_nb is not None and "between(t,0.100,1.900)" in fc_nb, fc_nb
+print("BLUR DYNAMIC OK")
+
+# --- translate: kutip dibersihkan + polish LLM untuk baris MyMemory ---
+os.environ["TIPROUTER_API_KEY"] = "test-key"
+lp.POLISH_WITH_LLM = True
+lp._cache.clear()
+lp.deepl_translate = lambda t: None
+lp.google_translate = lambda t: ('"Sudah dipikirkan dengan baik"', "mymemory")
+lp.llm_translate = lambda lines, system=None: ["Aku sudah memutuskannya" for _ in lines]
+segs5 = [{"text_zh": "我想好了"}]
+segs5, failed5 = lp.translate_segments(segs5)
+assert failed5 == [], failed5
+assert segs5[0]["text_id"] == "Aku sudah memutuskannya", segs5
+# Tanpa key LLM, polish dilewati dan kutip tetap dibersihkan
+del os.environ["TIPROUTER_API_KEY"]
+lp._cache.clear()
+segs6 = [{"text_zh": "我想好了"}]
+segs6, failed6 = lp.translate_segments(segs6)
+assert segs6[0]["text_id"] == "Sudah dipikirkan dengan baik", segs6
+print("TRANSLATE POLISH OK")

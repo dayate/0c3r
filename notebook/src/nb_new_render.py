@@ -1,6 +1,34 @@
 import glob, json, os, subprocess, time
 import re as _re
 
+
+def is_name_card(text, bbox):
+    """True kalau segmen ini kartu nama/peran, bukan dialog (lihat OCR)."""
+    if not text or not bbox:
+        return False
+    x0, y0, x1, y1 = bbox
+    w, h = x1 - x0, y1 - y0
+    if h <= 0 or w >= 0.6 * h or h < 0.10:
+        return False
+    role_words = ("总裁", "董事长", "总经理", "副总裁", "集团", "董事", "总裁夫人")
+    if any(k in text for k in role_words):
+        return True
+    if len(text.strip()) <= 4:
+        return True
+    return False
+
+
+def drop_name_cards(segs):
+    """Buang segmen kartu nama/peran dari daftar. Return (segs_baru, jumlah)."""
+    kept, dropped = [], 0
+    for s in segs:
+        if is_name_card(s.get("text_zh") or "", s.get("bbox")):
+            dropped += 1
+            continue
+        kept.append(s)
+    return kept, dropped
+
+
 # Validator SRT (cadangan): kalau cell 3b belum dijalankan di sesi ini,
 # definisi di bawah dipakai supaya cell tidak crash NameError.
 # Isinya sama dengan notebook/src/nb_new_validate.py.
@@ -205,8 +233,8 @@ def build_blur(segs, band, vw, vh, mode):
     False -> hanya pada window tiap segmen. dynamic: rect per segmen (paling presisi)."""
     def blur(h):
         r = max(2, min(BLUR_RADIUS, h // 2 - 1))
-        return (f"boxblur=luma_radius={r}:luma_power=2:"
-                f"chroma_radius={max(1, r // 2)}:chroma_power=1")
+        return (f"boxblur=luma_radius={r}:luma_power=3:"
+                f"chroma_radius={max(1, r // 2)}:chroma_power=2")
 
     if mode == "dynamic":
         chain, cur = [], "[0:v]"
@@ -215,15 +243,28 @@ def build_blur(segs, band, vw, vh, mode):
             _, fy, _, fh = _rect(band, vw, vh)
         for i, s in enumerate(segs):
             b = s.get("bbox")
-            if not b:
+            if b:
+                x, y, w, h = _rect(b, vw, vh)
+                # Perlebar sedikit supaya tepi glyph tidak bocor
+                _px = max(4, int(BLUR_PAD_X * vw))
+                x = max(0, x - _px)
+                w = min(vw - x, w + 2 * _px)
+                if fy is not None:
+                    y, h = fy, fh
+                    w = max(16, min(x + w, vw) - x)
+            elif band:
+                # Segmen tanpa bbox (mis. Whisper-only): pakai band supaya
+                # teks Mandarin tidak bocor saat timing-nya tampil.
+                x, y, w, h = _rect(band, vw, vh)
+            else:
                 continue
-            x, y, w, h = _rect(b, vw, vh)
-            if fy is not None:
-                y, h = fy, fh
-                w = max(16, min(x + w, vw) - x)
+            # Jendela blur diperlebar ±BLUR_TIME_PAD: timing OCR bisa meleset
+            # ~0.5 detik (sampling 1 fps), tanpa padding teks sempat bocor.
+            t0 = max(0.0, float(s["start"]) - BLUR_TIME_PAD)
+            t1 = float(s["end"]) + BLUR_TIME_PAD
             chain.append(
                 f"{cur}split=2[bi{i}][vm{i}];[bi{i}]crop={w}:{h}:{x}:{y},{blur(h)}[bb{i}];"
-                f"[vm{i}][bb{i}]overlay={x}:{y}:enable='between(t,{s['start']},{s['end']})'[o{i}]")
+                f"[vm{i}][bb{i}]overlay={x}:{y}:enable='between(t,{t0:.3f},{t1:.3f})'[o{i}]")
             cur = f"[o{i}]"
         return (";".join(chain), cur) if chain else (None, None)
 
@@ -348,6 +389,8 @@ for i, vid_path in enumerate(videos, 1):
     with open(ep_json, encoding="utf-8") as f:
         payload = json.load(f)
     segs = payload.get("segments", [])
+    # Kartu nama/peran bukan dialog: buang supaya tidak dibakar jadi subtitle.
+    segs, _n_cards = drop_name_cards(segs)
     # Normalisasi dulu (rapikan overlap / baris panjang), baru validasi.
     # Jangan bakar video dari SRT yang tidak valid / belum diterjemah penuh.
     segs, _nstats = normalize_segments(segs)

@@ -156,6 +156,40 @@ def _merge_boxes(boxes):
     return [round(x0, 4), round(y0, 4), round(x1, 4), round(y1, 4)]
 
 
+def is_name_card(text, bbox):
+    """True kalau segmen ini kartu nama/peran, bukan dialog.
+
+    Kartu perkenalan di duanju vertikal: nama besar + jabatan kecil di
+    sampingnya (mis. 韩沐宸 / 丰宸集团总裁), ditulis tegak di kiri layar.
+    Ciri: bbox tegak (lebar jauh lebih kecil dari tinggi) DAN teksnya
+    berisi kata jabatan, atau teksnya sangat pendek (nama saja).
+    Dialog sungguhan hampir selalu horizontal, jadi aturan ini aman.
+    """
+    if not text or not bbox:
+        return False
+    x0, y0, x1, y1 = bbox
+    w, h = x1 - x0, y1 - y0
+    if h <= 0 or w >= 0.6 * h or h < 0.10:
+        return False
+    role_words = ("总裁", "董事长", "总经理", "副总裁", "集团", "董事", "总裁夫人")
+    if any(k in text for k in role_words):
+        return True
+    if len(text.strip()) <= 4:
+        return True
+    return False
+
+
+def drop_name_cards(segs):
+    """Buang segmen kartu nama/peran dari daftar. Return (segs_baru, jumlah)."""
+    kept, dropped = [], 0
+    for s in segs:
+        if is_name_card(s.get("text_zh") or "", s.get("bbox")):
+            dropped += 1
+            continue
+        kept.append(s)
+    return kept, dropped
+
+
 def ocr_chunk(vid_path, start, dur, out_json):
     """Extract + OCR satu chunk, simpan checkpoint."""
     fd = os.path.join(WORK_DIR, "frames", os.path.splitext(os.path.basename(out_json))[0])
@@ -208,6 +242,11 @@ def ocr_chunk(vid_path, start, dur, out_json):
                      "text_zh": cur_text, "bbox": _merge_boxes(cur_boxes)})
 
     segs = [s for s in segs if (s["end"] - s["start"]) >= MIN_DUR]
+    # Kartu nama/peran bukan dialog: buang supaya tidak diterjemah dan
+    # dibakar jadi subtitle (mis. "Presiden Direktur Grup Fengchen 1").
+    segs, n_cards = drop_name_cards(segs)
+    if n_cards:
+        print(f"  [ocr] chunk {start:.0f}-{start + dur:.0f}s kartu nama dibuang: {n_cards}", flush=True)
     write_json_atomic(out_json, {"start": start, "end": start + dur, "frames": len(frames),
                                  "fingerprint": fingerprint(), "segments": segs})
     print(f"  [ocr] chunk {start:.0f}-{start + dur:.0f}s frames={len(frames)} segmen={len(segs)} "

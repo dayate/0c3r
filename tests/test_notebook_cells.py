@@ -163,3 +163,19 @@ hard = os.path.join(out, "episodes_hardsub_id", stem + "_id_hardsub.mp4")
 assert os.path.getsize(hard) > 0, "hardsub tidak dibuat"
 print("CELL RENDER OK", os.path.getsize(hard), "bytes")
 
+# Kartu nama/peran dibuang di cell Translate (definisi unconditional)
+_card = {"start": 119.0, "end": 121.0, "text_zh": "丰宸集团总裁", "bbox": [0.05, 0.50, 0.12, 0.65]}
+assert g["is_name_card"](_card["text_zh"], _card["bbox"])
+_kept, _n = g["drop_name_cards"]([_card, {"start": 0.5, "end": 1.5, "text_zh": "你好", "bbox": [0.2, 0.66, 0.8, 0.72]}])
+assert _n == 1 and len(_kept) == 1
+print("CELL NAME CARD OK")
+
+# Blur dynamic: radius/power baru + jendela ber-padding
+# (radius 20 di-config, tapi dibatasi setengah tinggi crop: 30px -> 14)
+_bsegs = [{"start": 0.5, "end": 1.5, "text_zh": "你好", "bbox": [0.2, 0.66, 0.8, 0.72]}]
+_band = g["compute_band"](_bsegs, 360)
+_fc, _ = g["build_blur"](_bsegs, _band, 640, 360, "dynamic")
+assert "luma_radius=14" in _fc and "luma_power=3" in _fc, _fc
+assert "between(t,0.100,1.900)" in _fc, _fc
+print("CELL BLUR DYNAMIC OK")
+

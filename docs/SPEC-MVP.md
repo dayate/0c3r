@@ -25,13 +25,13 @@ Colab, dengan komputasi di GPU remote (Colab T4).
 | D3 | Bahasa sumber | `zh` saja untuk saat ini (Mandarin dulu) |
 | D4 | Bahasa target | `id` |
 | D5 | Format output | **SRT saja** (ASS/VTT pasca-MVP) + video hardsub ID |
-| D6 | Terjemahan | Gratis dulu (DeepL → Google → MyMemory), LLM fallback; **tidak ada baris Mandarin yang dibiarkan di SRT ID** |
+| D6 | Terjemahan | Gratis dulu (DeepL → Google → MyMemory), LLM fallback; **tidak ada baris Mandarin yang dibiarkan di SRT ID**. Baris MyMemory/Google di-polish LLM (kalau ada key); kartu nama/peran difilter, tanda kutip pembungkus dibersihkan |
 | D7 | Jalur pipeline | **Jalur 3 (hardsub/OCR + Whisper timing) saja**; Jalur 1 softsub dan Jalur 2 Whisper-only ditunda |
 | D8 | ASR model | `large-v3-turbo` (faster-whisper, `compute_type=float16`), bahasa `zh` dikunci, VAD mati, temperature 0,0, word timestamp nyala — hanya untuk timing/fusi, bukan transkrip utama |
 | D9 | Chunk | 600 detik, idempoten, resumable |
 | D10 | Privasi | File sumber hanya untuk pemrosesan; tidak untuk training |
 | D11 | Mesin OCR | RapidOCR (bukan PaddleOCR) |
-| D12 | Blur | `static` dan `dynamic` tetap tersedia sebagai opsi |
+| D12 | Blur | `static` dan `dynamic` tetap tersedia sebagai opsi; default `dynamic` (radius 20, power 3, jendela ±0,4 detik) sejak 2026-11-27 — band statis meninggalkan bayangan glyph di latar gelap dan mengaburkan wajah di area tanpa teks |
 
 ## 3. Ruang lingkup MVP
 

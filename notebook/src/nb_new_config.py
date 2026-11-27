@@ -20,9 +20,16 @@ CHUNK_SECONDS = 600     # checkpoint OCR per chunk, aman di-interrupt
 # --- Parameter Blur & Hardsub ---
 # "static"  = 1 band vertikal FIXED + time-gate (blur hanya nyala saat ada teks) -> murah
 # "dynamic" = box per segmen (tinggi dikunci ke band) -> presisi, tapi N crop+blur+overlay
-BLUR_MODE = "static"
+# Default dynamic sejak 2026-11-27: band statis mengaburkan wajah/kulit di
+# area yang tidak ada teks (leher di detik ~89) dan radius kecil meninggalkan
+# bayangan glyph Mandarin di latar gelap (detik ~5). Dynamic hanya blur di
+# tempat teks berada, saat teks tampil (+ padding waktu).
+BLUR_MODE = "dynamic"
 ALWAYS_BLUR = True      # True: band selalu blur (OCR miss tidak bikin Mandarin bocor)
-BLUR_RADIUS = 12        # 15+ mulai merusak background
+BLUR_RADIUS = 20        # 12 terlalu lemah: glyph putih di latar gelap masih
+                        # kelihatan sebagai bercak; 20 + power 3 menghilangkannya
+BLUR_TIME_PAD = 0.4     # dynamic: jendela blur diperlebar ±0.4 detik supaya
+                        # tidak miss kalau timing OCR meleset sedikit
 BLUR_PAD_X = 0.02
 BLUR_PAD_Y = 0.012
 PROGRESS_PCT = 10       # print progress ffmpeg tiap N persen
@@ -34,6 +41,12 @@ LLM_MODELS = ["auto", "deepseek-v4.1-flash-1017"]   # diuji: hanya ini yang ters
 LLM_BATCH = 20
 LLM_TIMEOUT = 180
 FREE_DELAY = 0.5
+# Polish: baris yang diterjemah lewat MyMemory/Google (paling lemah) dilewatkan
+# sekali lagi lewat LLM supaya bahasanya natural seperti dialog drama.
+# Tidak jalan kalau TIPROUTER_API_KEY kosong; DeepL tidak ikut di-polish
+# karena kualitasnya sudah bagus. Matikan dengan POLISH_WITH_LLM = False
+# kalau tidak mau ada biaya LLM tambahan (±3 batch untuk 45 baris).
+POLISH_WITH_LLM = True
 # API key: pakai Colab Secret "TIPROUTER_API_KEY" / env var, atau tempel di sini
 TIPROUTER_API_KEY = ""   # <-- tempel di sini kalau tidak pakai Colab secret
 DEEPL_API_KEY = ""

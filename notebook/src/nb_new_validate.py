@@ -29,6 +29,40 @@ def has_mandarin(text):
     return bool(text and _CJK_RE.search(text))
 
 
+def is_name_card(text, bbox):
+    """True kalau segmen ini kartu nama/peran, bukan dialog.
+
+    Kartu perkenalan di duanju vertikal: nama besar + jabatan kecil di
+    sampingnya (mis. 韩沐宸 / 丰宸集团总裁), ditulis tegak di kiri layar.
+    Ciri: bbox tegak (lebar jauh lebih kecil dari tinggi) DAN teksnya
+    berisi kata jabatan, atau teksnya sangat pendek (nama saja).
+    Dialog sungguhan hampir selalu horizontal, jadi aturan ini aman.
+    """
+    if not text or not bbox:
+        return False
+    x0, y0, x1, y1 = bbox
+    w, h = x1 - x0, y1 - y0
+    if h <= 0 or w >= 0.6 * h or h < 0.10:
+        return False
+    role_words = ("总裁", "董事长", "总经理", "副总裁", "集团", "董事", "总裁夫人")
+    if any(k in text for k in role_words):
+        return True
+    if len(text.strip()) <= 4:
+        return True
+    return False
+
+
+def drop_name_cards(segs):
+    """Buang segmen kartu nama/peran dari daftar. Return (segs_baru, jumlah)."""
+    kept, dropped = [], 0
+    for s in segs:
+        if is_name_card(s.get("text_zh") or "", s.get("bbox")):
+            dropped += 1
+            continue
+        kept.append(s)
+    return kept, dropped
+
+
 def _wrap_text(text, max_len=MAX_CHARS_PER_LINE):
     """Bungkus teks di batas kata jadi baris-baris <= max_len karakter.
     Teks Mandarin tanpa spasi dibungkus per karakter."""

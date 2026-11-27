@@ -12,6 +12,35 @@ def has_mandarin(text):
 # di sesi ini — mis. runtime restart lalu cell Translate dijalankan
 # langsung — definisi di bawah dipakai supaya cell tidak crash NameError.
 # Isinya sama dengan notebook/src/nb_new_validate.py.
+# Filter kartu nama juga didefinisikan di sini supaya ep_json lama (yang
+# masih berisi kartu nama dari OCR sebelum filter) tetap dibersihkan.
+def is_name_card(text, bbox):
+    """True kalau segmen ini kartu nama/peran, bukan dialog (lihat OCR)."""
+    if not text or not bbox:
+        return False
+    x0, y0, x1, y1 = bbox
+    w, h = x1 - x0, y1 - y0
+    if h <= 0 or w >= 0.6 * h or h < 0.10:
+        return False
+    role_words = ("总裁", "董事长", "总经理", "副总裁", "集团", "董事", "总裁夫人")
+    if any(k in text for k in role_words):
+        return True
+    if len(text.strip()) <= 4:
+        return True
+    return False
+
+
+def drop_name_cards(segs):
+    """Buang segmen kartu nama/peran dari daftar. Return (segs_baru, jumlah)."""
+    kept, dropped = [], 0
+    for s in segs:
+        if is_name_card(s.get("text_zh") or "", s.get("bbox")):
+            dropped += 1
+            continue
+        kept.append(s)
+    return kept, dropped
+
+
 if "assert_valid_segments" not in globals() or "normalize_segments" not in globals():
     def _wrap_text(text, max_len=42):
         text = (text or "").strip()
@@ -149,10 +178,10 @@ def _strip_json(txt):
     return txt[i:j + 1] if i >= 0 and j > i else txt
 
 
-def llm_translate(lines):
+def llm_translate(lines, system=None):
     if not TIPROUTER_API_KEY:
         return None
-    system = ("Kamu penerjemah subtitle drama Mandarin ke bahasa Indonesia. "
+    system = system or ("Kamu penerjemah subtitle drama Mandarin ke bahasa Indonesia. "
               "Terjemahkan tiap baris secara natural dan ringkas, jangan menambah penjelasan. "
               "Balas HANYA JSON array of string, jumlah dan urutan sama dengan input.")
     body = {"temperature": 0.2,
@@ -236,6 +265,27 @@ def llm_translate_single(text):
     return None
 
 
+def _clean_id(text):
+    """Bersihkan hasil terjemah: buang tanda kutip yang membungkus seluruh
+    baris (MyMemory sering mempertahankannya, mis. "Selamat ulang tahun")
+    dan spasi ganda. Makna tidak diubah."""
+    text = (text or "").strip()
+    if len(text) >= 2 and text[0] in "\"“”'" and text[-1] in "\"“”'":
+        text = text[1:-1].strip()
+    return " ".join(text.split())
+
+
+def llm_polish(lines):
+    """Polish terjemahan Indonesia supaya natural seperti dialog drama.
+    Dipakai hanya untuk baris dari MyMemory/Google. Return list atau None."""
+    system = ("Kamu editor subtitle drama. Perbaiki terjemahan Indonesia ini "
+              "supaya natural seperti dialog sehari-hari, jangan kaku, jangan "
+              "ubah makna, jangan tambah atau buang informasi, jangan tambah "
+              "tanda kutip. Balas HANYA JSON array of string, jumlah dan "
+              "urutan sama dengan input.")
+    return llm_translate(lines, system=system)
+
+
 def translate_segments(segs):
     """Gratis dulu (DeepL -> Google -> MyMemory), sisa gagal baru LLM batch,
     lalu LLM per baris. Return (segs, failed_list).
@@ -256,18 +306,21 @@ def translate_segments(segs):
             todo.append(zh)
 
     uniq = list(dict.fromkeys(todo))
-    stats = {"deepl": 0, "google": 0, "mymemory": 0, "llm": 0}
+    stats = {"deepl": 0, "google": 0, "mymemory": 0, "llm": 0, "polish": 0}
+    prov_of = {}
     failed = []
     for n, zh in enumerate(uniq, 1):
         out = deepl_translate(zh)
         if out and out != zh:
             _cache[zh] = out
             stats["deepl"] += 1
+            prov_of[zh] = "deepl"
             continue
         out, prov = google_translate(zh)
         if out and out != zh:
             _cache[zh] = out
             stats[prov] += 1
+            prov_of[zh] = prov
         else:
             failed.append(zh)
         if n % 10 == 0:
@@ -302,12 +355,35 @@ def translate_segments(segs):
                 save_cache()
         save_cache()
 
+    # Polish LLM: baris dari MyMemory/Google ditulis ulang supaya natural.
+    # DeepL tidak ikut (kualitasnya sudah bagus), baris dari cache tidak
+    # ikut (provider asalnya tidak tercatat). Hasil polish dipakai hanya
+    # kalau bersih dari Mandarin dan panjangnya wajar (0.5x-2x aslinya).
+    if POLISH_WITH_LLM and TIPROUTER_API_KEY:
+        cands = [zh for zh in uniq
+                 if prov_of.get(zh) in ("mymemory", "google")
+                 and _cache.get(zh) and not has_mandarin(_cache[zh])]
+        if cands:
+            print(f"  [tr] polish LLM {len(cands)} baris (MyMemory/Google)", flush=True)
+            for i in range(0, len(cands), LLM_BATCH):
+                chunk = cands[i:i + LLM_BATCH]
+                out = llm_polish([_cache[zh] for zh in chunk])
+                if out:
+                    for zh, id_ in zip(chunk, out):
+                        old = _cache[zh]
+                        if (id_ and id_ != old and not has_mandarin(id_)
+                                and 0.5 * len(old) <= len(id_) <= 2.0 * len(old)):
+                            _cache[zh] = _clean_id(id_)
+                            stats["polish"] += 1
+                print(f"  [tr] polish {min(i + LLM_BATCH, len(cands))}/{len(cands)}", flush=True)
+            save_cache()
+
     for s in segs:
         zh = (s.get("text_zh") or "").strip()
         if zh:
             cand = _cache.get(zh)
             # Jangan pernah menulis Mandarin ke text_id
-            s["text_id"] = cand if (cand and not has_mandarin(cand)) else ""
+            s["text_id"] = _clean_id(cand) if (cand and not has_mandarin(cand)) else ""
 
     done = sum(1 for s in segs if s.get("text_id"))
     failed_final = []
@@ -317,7 +393,7 @@ def translate_segments(segs):
             failed_final.append({"start": s.get("start"), "end": s.get("end"),
                                  "text_zh": zh, "reason": "all_providers_failed"})
     print(f"  [tr] DeepL={stats['deepl']} Google={stats['google']} MyMemory={stats['mymemory']} "
-          f"LLM={stats['llm']} gagal={len(failed_final)} | {done}/{len(segs)} segmen",
+          f"LLM={stats['llm']} polish={stats['polish']} gagal={len(failed_final)} | {done}/{len(segs)} segmen",
           flush=True)
     return segs, failed_final
 
@@ -338,6 +414,13 @@ for i, vid_path in enumerate(videos, 1):
     with open(ep_json, encoding="utf-8") as f:
         payload = json.load(f)
     segs = payload.get("segments", [])
+    # Kartu nama/peran bukan dialog: buang sebelum dihitung/diterjemah.
+    # Penting untuk ep_json lama yang masih berisi kartu dari OCR sebelum
+    # filter ada — tanpa ini kartu ikut diterjemah dan dibakar jadi subtitle.
+    segs, _n_cards = drop_name_cards(segs)
+    if _n_cards:
+        payload["segments"] = segs
+        print(f"[tr] {i}/{len(videos)} {stem}: kartu nama dibuang: {_n_cards}", flush=True)
     missing = sum(1 for s in segs if (s.get("text_zh") or "").strip()
                   and not (s.get("text_id") or "").strip())
     if not missing and os.path.exists(out_id_srt):
@@ -346,7 +429,8 @@ for i, vid_path in enumerate(videos, 1):
         # Rapikan dan tulis ulang kalau ada yang berubah — tanpa ini
         # cell akan skip dan SRT yang lama (overlap) tetap dipakai.
         segs, _nstats = normalize_segments(segs)
-        if _nstats["trimmed"] or _nstats["dropped"] or _nstats["wrapped"] or _nstats["split"]:
+        if (_n_cards or _nstats["trimmed"] or _nstats["dropped"]
+                or _nstats["wrapped"] or _nstats["split"]):
             payload["segments"] = segs
             write_json_atomic(ep_json, payload)
             write_srt(segs, out_id_srt, "text_id")
