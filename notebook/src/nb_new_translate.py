@@ -1,5 +1,13 @@
 import glob, json, os, re, time, urllib.error, urllib.request
 
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+
+
+def has_mandarin(text):
+    """True kalau teks masih berisi karakter Mandarin (belum diterjemah)."""
+    return bool(text and _CJK_RE.search(text))
+
+
 _deepl = None
 _google = None
 _mymemory = None
@@ -88,8 +96,27 @@ def google_translate(text):
     return None, None
 
 
+def llm_translate_single(text):
+    """Retry per baris lewat LLM, model kedua dulu, 2x percobaan per model.
+
+    Dipakai hanya untuk baris yang gagal di semua jalur sebelumnya.
+    Return teks Indonesia atau None.
+    """
+    out = llm_translate([text])
+    if out and out[0] and out[0] != text and not has_mandarin(out[0]):
+        return out[0]
+    return None
+
+
 def translate_segments(segs):
-    """Gratis dulu (DeepL -> Google -> MyMemory), sisa gagal baru LLM batch."""
+    """Gratis dulu (DeepL -> Google -> MyMemory), sisa gagal baru LLM batch,
+    lalu LLM per baris. Return (segs, failed_list).
+
+    Jaminan: tidak ada baris yang dibiarkan Mandarin di text_id.
+    Baris yang masih gagal setelah semua fallback dikembalikan di failed_list
+    dan TIDAK ditulis ke SRT ID — pemanggil wajib menulis daftar review dan
+    berhenti dengan status gagal yang jelas.
+    """
     todo = []
     for s in segs:
         zh = (s.get("text_zh") or "").strip()
@@ -126,22 +153,45 @@ def translate_segments(segs):
             out = llm_translate(chunk)
             if out:
                 for zh, id_ in zip(chunk, out):
-                    if id_ and id_ != zh:
+                    if id_ and id_ != zh and not has_mandarin(id_):
                         _cache[zh] = id_
                         stats["llm"] += 1
             print(f"  [tr] LLM {min(i + LLM_BATCH, len(failed))}/{len(failed)}", flush=True)
             save_cache()
 
+    # Fallback terakhir: retry per baris lewat LLM (model kedua dulu di dalam
+    # llm_translate). Baris yang lolos di sini masuk cache seperti biasa.
+    still_failed = [zh for zh in failed
+                    if zh not in _cache or has_mandarin(_cache.get(zh, zh))]
+    if still_failed:
+        print(f"  [tr] {len(still_failed)} baris -> LLM per baris (retry terakhir)", flush=True)
+        for n, zh in enumerate(still_failed, 1):
+            out = llm_translate_single(zh)
+            if out:
+                _cache[zh] = out
+                stats["llm"] += 1
+            if n % 5 == 0:
+                save_cache()
+        save_cache()
+
     for s in segs:
         zh = (s.get("text_zh") or "").strip()
         if zh:
-            s["text_id"] = _cache.get(zh, s.get("text_id") or zh)
+            cand = _cache.get(zh)
+            # Jangan pernah menulis Mandarin ke text_id
+            s["text_id"] = cand if (cand and not has_mandarin(cand)) else ""
 
-    done = sum(1 for s in segs if s.get("text_id") and s["text_id"] != s.get("text_zh"))
+    done = sum(1 for s in segs if s.get("text_id"))
+    failed_final = []
+    for s in segs:
+        zh = (s.get("text_zh") or "").strip()
+        if zh and not s.get("text_id"):
+            failed_final.append({"start": s.get("start"), "end": s.get("end"),
+                                 "text_zh": zh, "reason": "all_providers_failed"})
     print(f"  [tr] DeepL={stats['deepl']} Google={stats['google']} MyMemory={stats['mymemory']} "
-          f"LLM={stats['llm']} gagal={len(failed) - stats['llm']} | {done}/{len(segs)} segmen",
+          f"LLM={stats['llm']} gagal={len(failed_final)} | {done}/{len(segs)} segmen",
           flush=True)
-    return segs
+    return segs, failed_final
 
 
 # ========================= tahap 2: Translate =========================
@@ -166,9 +216,20 @@ for i, vid_path in enumerate(videos, 1):
         print(f"[tr] {i}/{len(videos)} {stem}: skip ({len(segs)} segmen sudah diterjemah)", flush=True)
         continue
     print(f"[tr] {i}/{len(videos)} {stem}: {len(segs)} segmen, {missing} baru", flush=True)
-    translate_segments(segs)
+    segs, failed_final = translate_segments(segs)
     payload["segments"] = segs
+    if failed_final:
+        review_path = os.path.join(PER_EP_DIR, f"{stem}_review.json")
+        write_json_atomic(review_path, {"episode": stem, "failed": failed_final})
+        print(f"[tr] {i}/{len(videos)} {stem}: GAGAL {len(failed_final)} baris, "
+              f"daftar review: {review_path}", flush=True)
+        raise RuntimeError(
+            f"translate gagal {len(failed_final)} baris di {stem} "
+            f"(lihat {review_path}); perbaiki API key / koneksi lalu jalankan "
+            f"cell ini lagi — hanya baris di daftar review yang dicoba ulang")
     write_json_atomic(ep_json, payload)
     write_srt(segs, out_id_srt, "text_id")
+    # Validator: tolak SRT yang tidak valid / masih berisi Mandarin
+    assert_valid_segments(segs, where=f"translate {stem}")
 
 print("[tr] selesai", flush=True)

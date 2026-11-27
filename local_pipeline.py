@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Suba local — hardsub OCR pipeline (Mandarin -> Indonesia), tanpa Colab.
 
+HANYA UNTUK TESTING. Jalur utama adalah notebook Colab (notebook/src/).
+File ini adalah cermin untuk testing lokal, bukan sumber kebenaran.
+Cell Whisper timing + fusi hanya ada di notebook; di lokal timing tetap
+mengikuti OCR (±1 detik).
+
 Alur per episode: probe -> extract frame (fps sampling) -> OCR (ROI, gated, batched)
 -> dedupe jadi segmen -> translate (gratis DeepL -> Google -> MyMemory, LLM fallback)
 -> SRT zh/id -> render hardsub (blur band subtitle + burn sub ID, satu pass).
@@ -132,6 +137,54 @@ def write_srt(segs, path, key):
             f.write(f"{idx}\n{fmt_srt_time(s['start'])} --> {fmt_srt_time(s['end'])}\n{txt}\n\n")
             idx += 1
     os.replace(tmp, path)
+
+
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+
+
+def has_mandarin(text):
+    return bool(text and _CJK_RE.search(text))
+
+
+def validate_segments(segs, check_id=True):
+    """Validator SRT (cermin notebook/src/nb_new_validate.py)."""
+    errors = []
+    prev_end = None
+    for idx, s in enumerate(segs):
+        start = float(s.get("start", 0.0))
+        end = float(s.get("end", 0.0))
+        if not end > start:
+            errors.append(f"segmen {idx}: end ({end}) tidak lebih besar dari start ({start})")
+            continue
+        if prev_end is not None and start < prev_end - 0.001:
+            errors.append(f"segmen {idx}: overlap / tidak monoton (start {start} < prev end {prev_end})")
+        prev_end = max(prev_end or 0.0, end)
+        if end - start < 0.35 or end - start > 7.0:
+            errors.append(f"segmen {idx}: durasi {end - start:.2f}s di luar batas wajar")
+        for key in ("text_zh", "text_id"):
+            txt = (s.get(key) or "").strip()
+            if not txt:
+                continue
+            if len(txt.split("\n")) > 2:
+                errors.append(f"segmen {idx} ({key}): lebih dari 2 baris")
+            for line in txt.split("\n"):
+                if len(line) > 42:
+                    errors.append(f"segmen {idx} ({key}): baris {len(line)} karakter, maks 42")
+        if check_id:
+            txt_id = (s.get("text_id") or "").strip()
+            zh = (s.get("text_zh") or "").strip()
+            if zh and not txt_id:
+                errors.append(f"segmen {idx}: belum diterjemah (text_id kosong)")
+            elif txt_id and has_mandarin(txt_id):
+                errors.append(f"segmen {idx}: SRT ID masih berisi Mandarin")
+    return errors
+
+
+def assert_valid_segments(segs, where=""):
+    errors = validate_segments(segs)
+    if errors:
+        raise ValueError(f"validator SRT gagal {where}: " + "; ".join(errors[:10]))
+    return True
 
 
 def write_json_atomic(path, payload):
@@ -478,8 +531,20 @@ def google_translate(text):
     return None, None
 
 
+def llm_translate_single(text):
+    """Retry per baris lewat LLM. Return teks Indonesia atau None."""
+    out = llm_translate([text])
+    if out and out[0] and out[0] != text and not has_mandarin(out[0]):
+        return out[0]
+    return None
+
+
 def translate_segments(segs):
-    """Gratis dulu (DeepL -> Google -> MyMemory), sisa gagal baru LLM batch."""
+    """Gratis dulu (DeepL -> Google -> MyMemory), sisa gagal baru LLM batch,
+    lalu LLM per baris. Return (segs, failed_list).
+
+    Jaminan: tidak ada baris yang dibiarkan Mandarin di text_id.
+    """
     todo = []
     for s in segs:
         zh = (s.get("text_zh") or "").strip()
@@ -516,22 +581,41 @@ def translate_segments(segs):
             out = llm_translate(chunk)
             if out:
                 for zh, id_ in zip(chunk, out):
-                    if id_ and id_ != zh:
+                    if id_ and id_ != zh and not has_mandarin(id_):
                         _cache[zh] = id_
                         stats["llm"] += 1
             log.info("[tr] LLM %d/%d", min(i + LLM_BATCH, len(failed)), len(failed))
             save_cache()
 
+    still_failed = [zh for zh in failed
+                    if zh not in _cache or has_mandarin(_cache.get(zh, zh))]
+    if still_failed:
+        log.warning("[tr] %d baris -> LLM per baris (retry terakhir)", len(still_failed))
+        for n, zh in enumerate(still_failed, 1):
+            out = llm_translate_single(zh)
+            if out:
+                _cache[zh] = out
+                stats["llm"] += 1
+            if n % 5 == 0:
+                save_cache()
+        save_cache()
+
     for s in segs:
         zh = (s.get("text_zh") or "").strip()
         if zh:
-            s["text_id"] = _cache.get(zh, s.get("text_id") or zh)
+            cand = _cache.get(zh)
+            s["text_id"] = cand if (cand and not has_mandarin(cand)) else ""
 
-    done = sum(1 for s in segs if s.get("text_id") and s["text_id"] != s.get("text_zh"))
+    done = sum(1 for s in segs if s.get("text_id"))
+    failed_final = [{"start": s.get("start"), "end": s.get("end"),
+                     "text_zh": (s.get("text_zh") or "").strip(),
+                     "reason": "all_providers_failed"}
+                    for s in segs
+                    if (s.get("text_zh") or "").strip() and not s.get("text_id")]
     log.info("[tr] DeepL=%d Google=%d MyMemory=%d LLM=%d gagal=%d | %d/%d segmen",
              stats["deepl"], stats["google"], stats["mymemory"], stats["llm"],
-             len(failed) - stats["llm"], done, len(segs))
-    return segs
+             len(failed_final), done, len(segs))
+    return segs, failed_final
 
 
 # ───────────────────────── render ─────────────────────────
@@ -755,17 +839,33 @@ def process_episode(vid_path, render):
     if os.path.exists(ep_json):
         with open(ep_json, encoding="utf-8") as f:
             payload = json.load(f)
-        segs = payload.get("segments", [])
-        if not os.path.exists(id_srt) or not os.path.exists(zh_srt):
-            write_srt(segs, zh_srt, "text_zh")
-            write_srt(segs, id_srt, "text_id")
-        log.info("pakai hasil OCR sebelumnya: %d segmen", len(segs))
+        # Resume per episode: cek fingerprint konfigurasi. Kalau berubah,
+        # hasil lama tidak dipakai — episode diulang.
+        if payload.get("fingerprint") != fingerprint():
+            log.info("config berubah, ulang OCR: %s", stem)
+            payload = None
+        else:
+            segs = payload.get("segments", [])
+            if not os.path.exists(id_srt) or not os.path.exists(zh_srt):
+                write_srt(segs, zh_srt, "text_zh")
+                write_srt(segs, id_srt, "text_id")
+            log.info("pakai hasil OCR sebelumnya: %d segmen", len(segs))
     else:
+        payload = None
+
+    if payload is None:
         segs, totals = extract_segments(vid_path, dur)
         timings.update(totals)
         t0 = time.time()
-        translate_segments(segs)
+        segs, failed_final = translate_segments(segs)
         timings["translate"] = time.time() - t0
+        if failed_final:
+            review_path = os.path.join(PER_EP_DIR, f"{stem}_review.json")
+            write_json_atomic(review_path, {"episode": stem, "failed": failed_final})
+            raise RuntimeError(
+                f"translate gagal {len(failed_final)} baris di {stem} "
+                f"(lihat {review_path})")
+        assert_valid_segments(segs, where=f"translate {stem}")
         write_json_atomic(ep_json, {
             "episode": stem, "video_file": os.path.basename(vid_path),
             "duration": round(dur, 3), "width": vw, "height": vh,
@@ -774,6 +874,7 @@ def process_episode(vid_path, render):
         write_srt(segs, id_srt, "text_id")
 
     if render and not os.path.exists(out_mp4):
+        assert_valid_segments(segs, where=f"render {stem}")
         _, t_render = render_hardsub(vid_path, id_srt, out_mp4, segs, vw, vh)
         timings["render"] = t_render
 

@@ -4,10 +4,9 @@ Versi notebook dari pipeline lokal (`local_pipeline.py`). Pipeline dipisah tiga 
 yang bisa dijalankan ulang sendiri-sendiri:
 
 1. **OCR** — RapidOCR (gratis) sampling `FPS=1` di ROI subtitle, checkpoint per chunk.
-2. **Translate** — gratis dulu (DeepL → Google → MyMemory), sisa gagal baru LLM
-   tiprouter. Cache per baris, jadi baris yang sudah diterjemah tidak diulang.
-3. **Blur + Burn** — band blur dihitung dari bbox teks, lalu blur + subtitle ID
-   dibakar dalam satu pass ffmpeg.
+2. **Whisper (cell terpisah)** — faster-whisper large-v3-turbo, bahasa Mandarin dikunci, merapikan timing OCR dari ±1 detik ke ~0,1–0,2 detik dan mengisi baris yang kelewat OCR.
+3. **Translate** — gratis dulu (DeepL → Google → MyMemory), sisa gagal baru LLM berlapis. Cache per baris, jadi baris yang sudah diterjemah tidak diulang. **Tidak ada baris Mandarin yang dibiarkan di SRT Indonesia.**
+4. **Blur + Burn** — band blur dihitung dari bbox teks, lalu blur + subtitle ID dibakar dalam satu pass ffmpeg.
 
 Catatan blur:
 
@@ -22,4 +21,4 @@ Catatan blur:
 Subtitle burn pakai ASS dengan `PlayResX/Y` = ukuran video (bukan `force_style` di SRT,
 yang di-scale libass terhadap 384x288 sehingga teks jadi raksasa).
 
-**Isi dulu cell "3 — Konfigurasi"** (path Drive + API key), lalu jalankan cell 4, 5, 6 berurutan.
+**Isi dulu cell "3 — Konfigurasi"** (path Drive + API key), lalu jalankan cell 4, 4b, 5, 6 berurutan.

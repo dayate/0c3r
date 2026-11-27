@@ -17,13 +17,13 @@ Dokumen di folder ini menjabarkan keputusan MVP dan kebutuhan teknis awal. **PRD
 
 ## Keputusan MVP aktif
 
-- Bentuk: CLI Python + Google Colab; gunakan Colab CLI yang sudah terpasang.
+- Bentuk: Notebook Colab (jalur utama); pipeline lokal hanya untuk testing.
 - Runner default: Colab T4 GPU (ketersediaannya harus dicek saat sesi dibuat).
-- Source: Korea (`ko`), Mandarin (`zh`), Inggris (`en`); target: Indonesia (`id`).
-- Output: SRT saja.
-- Terjemahan: LLM utama, DeepL fallback.
-- Jalur softsub, Whisper, dan hardsub/OCR **semuanya bagian dari MVP**.
-- Job harus bisa disambung ulang setelah sesi Colab atau koneksi terputus.
+- Source: Mandarin (`zh`) saja untuk saat ini; target: Indonesia (`id`).
+- Output: SRT + video hardsub ID.
+- Terjemahan: gratis dulu, LLM fallback berlapis, 0 baris Mandarin di SRT ID.
+- Jalur hardsub/OCR + Whisper timing adalah MVP; softsub dan Whisper-only ditunda.
+- Job harus bisa disambung ulang setelah sesi Colab atau koneksi terputus, dengan cek fingerprint konfigurasi per episode.
 
 ## Status bukti
 

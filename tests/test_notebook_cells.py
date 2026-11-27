@@ -19,6 +19,10 @@ cfg = cfg.replace('BASE_OUT_DIR = "/content/drive/MyDrive/duanju/suba_hardsub"',
 g = {"__name__": "__main__"}
 exec(compile(cfg, "config", "exec"), g)
 
+# Validator SRT harus tersedia sebelum cell translate / render dijalankan
+exec(compile(open(os.path.join(SRC, "nb_new_validate.py"), encoding="utf-8").read(), "validate", "exec"), g)
+assert callable(g["validate_segments"]) and callable(g["assert_valid_segments"])
+
 stem = "ç¬¬000001é›†"
 vid = os.path.join(eps, stem + ".mp4")
 subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
@@ -29,6 +33,20 @@ subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
 g["MAX_EPISODES"] = 0
 exec(compile(open(os.path.join(SRC, "nb_new_ocr.py"), encoding="utf-8").read(), "ocr", "exec"), g)
 assert callable(g["write_srt"]) and callable(g["probe"]), "fungsi OCR tidak terdefinisi"
+
+# Whisper cell: butuh fungsi util dari cell OCR (natural_key, write_srt, probe),
+# jadi dieksekusi setelah OCR — sama seperti urutan di notebook.
+g["MAX_EPISODES"] = 0
+exec(compile(open(os.path.join(SRC, "nb_new_whisper.py"), encoding="utf-8").read(), "whisper", "exec"), g)
+assert callable(g["fuse_segments"]), "fungsi fusi Whisper tidak terdefinisi"
+_ocr = [{"start": 0.0, "end": 2.0, "text_zh": "你好", "bbox": [0.2, 0.66, 0.8, 0.72]}]
+_wh = [{"start": 0.2, "end": 1.8, "text": "你好",
+        "words": [{"start": 0.2, "end": 1.0, "word": "你"}, {"start": 1.0, "end": 1.8, "word": "好"}]},
+       {"start": 3.0, "end": 3.8, "text": "再见", "words": []}]
+_fused, _stats = g["fuse_segments"](_ocr, _wh)
+assert _fused[0]["start"] == 0.2 and _fused[0]["end"] == 1.8, _fused
+assert _stats["whisper_only"] == 1 and len(_fused) == 2, (_stats, _fused)
+print("CELL WHISPER FUSE OK")
 
 g["MAX_EPISODES"] = 200
 ep_json = os.path.join(out, "per_episode", stem + "_ocr.json")

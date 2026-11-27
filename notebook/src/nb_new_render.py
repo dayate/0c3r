@@ -216,6 +216,8 @@ for i, vid_path in enumerate(videos, 1):
     with open(ep_json, encoding="utf-8") as f:
         payload = json.load(f)
     segs = payload.get("segments", [])
+    # Jangan bakar video dari SRT yang tidak valid / belum diterjemah penuh
+    assert_valid_segments(segs, where=f"render {stem}")
     dur, vw, vh = probe(vid_path)
     print(f"[render] {i}/{len(videos)} {stem} | {dur:.1f}s {vw}x{vh} {len(segs)} segmen", flush=True)
     enc, t_render = render_hardsub(vid_path, out_hard_mp4, segs, vw, vh)

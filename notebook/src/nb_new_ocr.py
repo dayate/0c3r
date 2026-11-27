@@ -266,8 +266,17 @@ for i, vid_path in enumerate(videos, 1):
     ep_json = os.path.join(PER_EP_DIR, f"{stem}_ocr.json")
     out_zh_srt = os.path.join(PER_EP_DIR, f"{stem}_zh.srt")
     if os.path.exists(ep_json):
-        print(f"[ocr] {i}/{len(videos)} {stem}: skip (json ada)", flush=True)
-        continue
+        try:
+            with open(ep_json, encoding="utf-8") as f:
+                _old = json.load(f)
+            # Resume per episode: cek fingerprint konfigurasi. Kalau berubah,
+            # hasil lama tidak dipakai — episode diulang dari awal.
+            if _old.get("fingerprint") == fingerprint():
+                print(f"[ocr] {i}/{len(videos)} {stem}: skip (json ada, config sama)", flush=True)
+                continue
+            print(f"[ocr] {i}/{len(videos)} {stem}: config berubah, ulang OCR", flush=True)
+        except Exception:
+            print(f"[ocr] {i}/{len(videos)} {stem}: json rusak, ulang OCR", flush=True)
     dur, vw, vh = probe(vid_path)
     print(f"[ocr] {i}/{len(videos)} {stem} | {dur:.1f}s {vw}x{vh}", flush=True)
     segs, totals = extract_segments(vid_path, dur)

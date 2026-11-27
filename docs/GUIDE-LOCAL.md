@@ -1,5 +1,10 @@
 # Suba Local — panduan jalan di PC sendiri
 
+> **HANYA UNTUK TESTING.** Jalur utama adalah notebook Colab
+> (`notebook/` → `colab-suba-hardsub-v2.ipynb`). File lokal ini adalah cermin
+> untuk testing, bukan sumber kebenaran. Cell Whisper timing + fusi hanya ada
+> di notebook; di lokal timing tetap mengikuti OCR (±1 detik).
+
 Versi lokal dari pipeline Colab (`notebook/` → `colab-suba-hardsub-v2.ipynb`).
 OCR gratis (RapidOCR/ONNX), blur area subtitle, terjemah gratis dulu + LLM fallback,
 hardsub MP4 + SRT.
@@ -48,9 +53,17 @@ Tiga lapis checkpoint, aman kalau proses dimatikan kapan saja:
 
 1. `work/chunks/<episode>/chunk_NNNNNN.json` — per 600 s. Fingerprint config disimpan;
    kalau `FPS`/`ROI`/`MAX_WIDTH` diubah, chunk otomatis diulang.
-2. `output/per_episode/<episode>_ocr.json` — episode selesai OCR+translate tidak diulang.
+2. `output/per_episode/<episode>_ocr.json` — episode selesai OCR+translate tidak diulang,
+   **kecuali fingerprint konfigurasi berubah** — kalau berubah, episode diulang.
 3. `work/cache/translate_cache.json` — cache terjemahan lintas episode & lintas run.
 4. `output/hardsub/*.mp4` yang sudah ada dilewati. Hapus file itu untuk render ulang.
+
+**Terjemah tidak boleh gagal diam-diam:** baris yang gagal di semua jalur
+(DeepL → Google → MyMemory → LLM batch → LLM per baris) masuk
+`output/per_episode/<episode>_review.json` dan proses berhenti dengan pesan
+gagal yang jelas. SRT Indonesia dijamin tidak berisi baris Mandarin; validator
+SRT menolak hasil yang melanggar aturan itu, timestamp tidak monoton, overlap,
+atau baris terlalu panjang.
 
 ## Knob yang sering dipakai
 

@@ -2,7 +2,7 @@
 
 ## Status dan batas desain
 
-Dokumen ini menerapkan keputusan MVP terbaru: CLI + Google Colab CLI, Colab T4 sebagai runner GPU default, source `ko`/`zh`/`en`, target `id`, SRT saja, LLM utama + DeepL fallback. **Ketiga jalur, termasuk hardsub/OCR, masuk MVP.**
+Dokumen ini menerapkan keputusan MVP terbaru: Notebook Colab, Colab T4 sebagai runner GPU default, source `zh`, target `id`, SRT + hardsub, gratis dulu + LLM fallback berlapis. **Hardsub/OCR + Whisper timing masuk MVP; softsub dan Whisper-only ditunda.**
 
 Logika produk tinggal di paket Python `suba/`; notebook (jika disediakan) hanya menjadi antarmuka opsional, bukan tempat implementasi pipeline. Colab T4 adalah target yang diminta, tetapi ketersediaan GPU bergantung pada akun dan kapasitas Colab. Tidak ada asumsi bahwa T4 selalu dialokasikan.
 
