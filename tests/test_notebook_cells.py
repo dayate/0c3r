@@ -515,4 +515,10 @@ for _prof, _out in (("colab", "colab-suba-hardsub-v2.ipynb"),
         # sebagai paket yang diganti) — cek barisnya, bukan seluruh cell.
         _pip = [l for l in _install_src.split("\n") if l.startswith("!pip install")]
         assert _pip and "nvidia-cudnn-cu12" not in _pip[0], _pip
+        # ORT GPU dipasang terakhir (2026-11-28): faster-whisper menarik
+        # onnxruntime CPU yang menimpa file GPU kalau satu baris pip.
+        _ort_lines = [l for l in _pip if "onnxruntime-gpu" in l]
+        assert _ort_lines and _ort_lines[0] == _pip[-1], _pip
+        assert "--force-reinstall" in _ort_lines[0] and "--no-deps" in _ort_lines[0], _ort_lines
+        assert "CUDAExecutionProvider" in _install_src, _install_src
 print("CELL PROFILE OK")

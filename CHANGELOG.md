@@ -4,6 +4,14 @@ Semua perubahan penting proyek ini, terbaru dulu. Tanggal WIB.
 
 ## 2026-11-28
 
+- **Install: onnxruntime-gpu dipasang terakhir** (notebook Colab):
+  faster-whisper menarik `onnxruntime` CPU dan pip memasangnya
+  belakangan sehingga menimpa file GPU — kedua paket 1.32.0 terpasang
+  tapi CUDA EP tidak terdaftar (ditemukan Taufik di T4, 2026-11-28).
+  Sekarang `onnxruntime-gpu` dipasang ulang paksa di akhir
+  (`--force-reinstall --no-deps`), plus assert CUDA EP di cell install
+  supaya gagal cepat. Varian Kaggle sudah memasang ORT di langkah
+  terpisah, tidak berubah.
 - **Batch 20–30 episode per sesi Colab** (pola pakai, bukan kode):
   `MAX_EPISODES` default 200 hanya batas atas; sesi gratis punya batas
   waktu/GPU, jadi bagi job besar jadi beberapa sesi. Checkpoint per

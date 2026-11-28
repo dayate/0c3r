@@ -9,7 +9,17 @@
 # - nvidia-cublas-cu12 TETAP ada: Whisper (faster-whisper/CTranslate2) butuh
 #   libcublas.so.12. nvidia-cudnn-cu12 DIGANTI cu13: CTranslate2 tidak
 #   link cuDNN (dicek via ldd), jadi tidak ada yang butuh cudnn-cu12.
-!pip install -q rapidocr "onnxruntime-gpu>=1.27" nvidia-cudnn-cu13 faster-whisper ipywidgets matplotlib nvidia-cublas-cu12
+# - onnxruntime-gpu DIPASANG TERAKHIR dengan --force-reinstall --no-deps
+#   (2026-11-28): faster-whisper menarik onnxruntime CPU, dan pip
+#   memasangnya belakangan sehingga menimpa file GPU — hasilnya kedua
+#   paket 1.32.0 terpasang tapi CUDA EP tidak terdaftar (tes manual
+#   Taufik di T4). Pasang ulang paksa di akhir memastikan file GPU
+#   yang menang; assert di bawah gagal cepat kalau masih CPU.
+!pip install -q rapidocr nvidia-cudnn-cu13 faster-whisper ipywidgets matplotlib nvidia-cublas-cu12
+!pip install -q --force-reinstall --no-deps "onnxruntime-gpu>=1.27"
+import onnxruntime as _ort
+assert "CUDAExecutionProvider" in _ort.get_available_providers(), \
+    "CUDA EP tidak terdaftar setelah install — cek pip (onnxruntime CPU menimpa GPU?)"
 !apt-get -qq update && apt-get -qq install -y fonts-noto-core fonts-dejavu-core
 !ffmpeg -version | head -1
 !nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
