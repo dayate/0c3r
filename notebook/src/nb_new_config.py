@@ -83,7 +83,9 @@ CIPROUTER_TIMEOUT = 120
 # Nama/istilah yang diganti di teks ZH SEBELUM dikirim ke translator
 # (bukan ke teks ZH yang disimpan): model sering salah menerjemah nama
 # orang dan 闺蜜 — kasus nyata 瘟疫 diterjemah jadi "Wabah".
-NAME_OVERRIDES = {"温薏": "Wen Yi", "韩沐宸": "Han Muchen", "闺蜜": "sahabat"}
+# "瘟疫": homofon 温薏 yang salah didengar Whisper (2026-11-28 ep 1:
+# segmen asr '瘟疫' diterjemah 'Wabah penyakit'; nama yang benar Wen Yi).
+NAME_OVERRIDES = {"温薏": "Wen Yi", "瘟疫": "Wen Yi", "韩沐宸": "Han Muchen", "闺蜜": "sahabat"}
 # API key: pakai Colab Secret "TIPROUTER_API_KEY" / env var, atau tempel di sini
 TIPROUTER_API_KEY = ""   # <-- tempel di sini kalau tidak pakai Colab secret
 # ===================================================

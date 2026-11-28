@@ -200,7 +200,9 @@ LLM_TIMEOUT = 180
 # Nama/istilah yang diganti di teks ZH SEBELUM dikirim ke LLM
 # (bukan ke teks ZH yang disimpan): model sering salah menerjemah nama
 # orang dan 闺蜜 — kasus nyata 瘟疫 diterjemah jadi "Wabah".
-NAME_OVERRIDES = {"温薏": "Wen Yi", "韩沐宸": "Han Muchen", "闺蜜": "sahabat"}
+# "瘟疫": homofon 温薏 yang salah didengar Whisper (2026-11-28 ep 1:
+# segmen asr '瘟疫' diterjemah 'Wabah penyakit'; nama yang benar Wen Yi).
+NAME_OVERRIDES = {"温薏": "Wen Yi", "瘟疫": "Wen Yi", "韩沐宸": "Han Muchen", "闺蜜": "sahabat"}
 
 MAX_OUTPUT_MB = 0       # 0 = nonaktif; >0 = peringatan keras di log kalau output lebih besar
 
@@ -280,6 +282,12 @@ def _wrap_text(text, max_len=42):
     return lines
 
 
+def _is_credit_line(text):
+    """Kartu kredit (mis. '字幕by索兰娅') bukan dialog — buang.
+    Pola sempit: kata '字幕' diikuti 'by' (nama pembuat subtitle)."""
+    return "字幕by" in (text or "").lower().replace(" ", "")
+
+
 def normalize_segments(segs):
     """Rapikan segmen supaya lolos validator (cermin nb_new_validate.py):
     potong overlap, bungkus baris > 42 char, pecah segmen yang teksnya
@@ -292,6 +300,9 @@ def normalize_segments(segs):
         s = dict(s)
         start = float(s.get("start", 0.0))
         end = float(s.get("end", 0.0))
+        if _is_credit_line(s.get("text_zh") or ""):
+            stats["dropped"] += 1
+            continue
         if not end > start:
             stats["dropped"] += 1
             continue
@@ -715,6 +726,7 @@ def _whisper_fingerprint():
         "rescan_pad": RESCAN_PAD,
         "rescan_upscale": RESCAN_UPSCALE,
         "rescan_min_dur": RESCAN_MIN_DUR,
+        "credit_filter": 1,
     }
 
 
@@ -1510,6 +1522,18 @@ def output_size(vw, vh):
             max(2, int(round(vh * f / 2.0)) * 2))
 
 
+def subtitle_margin_v(mode, band, vw, vh, font_size):
+    """MarginV ASS: mode blur (static/dynamic) menaruh sub Indo di tengah
+    band Mandarin (blur menutupi teks aslinya, sub menggantikannya di
+    tempat yang sama); mode=none (V0, tanpa blur) menaruh sub di bawah
+    video (area subtitle umum) supaya tidak menimpa teks Mandarin yang
+    tetap terlihat (2026-11-28: margin_v=602 menimpa band 0.63-0.718)."""
+    if mode == "none" or not band:
+        return int(vh * 0.06)
+    center_y = (band[1] + band[3]) / 2
+    return max(8, int(round((1 - center_y) * vh - font_size * 0.55)))
+
+
 def render_hardsub(vid_path, srt_path, out_mp4, segs, vw, vh, blur_mode=None):
     # None = baca global saat dipanggil (default arg statis tidak ikut --blur)
     blur_mode = _blur_mode_for(segs, blur_mode or BLUR_MODE)
@@ -1523,11 +1547,7 @@ def render_hardsub(vid_path, srt_path, out_mp4, segs, vw, vh, blur_mode=None):
              sum(1 for s in segs if s.get("bbox")), BLUR_RADIUS, ALWAYS_BLUR)
 
     font_size = max(20, round(vw * 0.042))
-    if band:
-        center_y = (band[1] + band[3]) / 2
-        margin_v = max(8, int(round((1 - center_y) * vh - font_size * 0.55)))
-    else:
-        margin_v = int(vh * 0.06)
+    margin_v = subtitle_margin_v(blur_mode, band, vw, vh, font_size)
 
     ass_path = os.path.join(WORK_DIR, os.path.splitext(os.path.basename(out_mp4))[0] + ".ass")
     write_ass(segs, ass_path, vw, vh, font_size, margin_v)

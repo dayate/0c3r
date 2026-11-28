@@ -4,6 +4,21 @@ Semua perubahan penting proyek ini, terbaru dulu. Tanggal WIB.
 
 ## 2026-11-28
 
+- **Posisi sub Indo mode V0 pindah ke bawah video**: rumus `margin_v`
+  lama menaruh sub Indo di tengah band Mandarin — benar untuk mode blur
+  (blur menutupi teks aslinya), tapi di V0 teks Mandarin tetap terlihat
+  sehingga sub menimpanya (ep 1: margin_v=602 menimpa band 0.63–0.718,
+  terbukti di frame t=1 dtk). Sekarang mode `none` pakai
+  `margin_v = vh*0.06` (y ~0,92, area subtitle umum); mode blur tetap
+  di tengah band. Helper baru `subtitle_margin_v` (notebook + lokal),
+  dites unit + render nyata (cek MarginV di file .ass).
+- **Kartu kredit dibuang + homofon nama**: segmen `字幕by索兰娅` (kartu
+  kredit, bukan dialog) ikut jadi subtitle "Subtitel oleh Solanya" di
+  ep 1 — sekarang dibuang di `normalize_segments` (semua salinan:
+  validate + fallback render/translate + lokal) dan ikut fingerprint
+  Whisper (`credit_filter`) supaya episode lama ikut dibersihkan saat
+  re-run. `瘟疫` (Whisper salah dengar `温薏`) ditambah ke
+  `NAME_OVERRIDES` jadi `Wen Yi` (sebelumnya "Wabah penyakit").
 - **Install: onnxruntime-gpu dipasang terakhir** (notebook Colab):
   faster-whisper menarik `onnxruntime` CPU dan pip memasangnya
   belakangan sehingga menimpa file GPU — kedua paket 1.32.0 terpasang

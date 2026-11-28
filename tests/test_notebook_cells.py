@@ -229,6 +229,16 @@ assert g2["validate_segments"](_fixed) == [], g2["validate_segments"](_fixed)
 assert all(len(l) <= 42 for s in _fixed for l in (s["text_id"] or "").split("\n"))
 print("CELL TRANSLATE NORMALIZE OK", _ns)
 
+# Kartu kredit bukan dialog (2026-11-28 ep 1: '字幕by索兰娅' ikut jadi subtitle).
+assert g2["_is_credit_line"]("字幕by索兰娅")
+assert g2["_is_credit_line"]("字幕 by 索兰娅")
+assert not g2["_is_credit_line"]("你好吗")
+_cred = [{"start": 156.0, "end": 158.0, "text_zh": "字幕by索兰娅", "text_id": "Subtitel oleh Solanya"},
+         {"start": 1.0, "end": 2.0, "text_zh": "你好", "text_id": "Halo"}]
+_fixed_c, _ns_c = g2["normalize_segments"](_cred)
+assert len(_fixed_c) == 1 and _fixed_c[0]["text_zh"] == "你好" and _ns_c["dropped"] == 1, (_fixed_c, _ns_c)
+print("CELL CREDIT FILTER OK")
+
 g["MAX_EPISODES"] = 200
 ep_json = os.path.join(out, "per_episode", stem + "_ocr.json")
 segs = [
@@ -383,6 +393,7 @@ finally:
 assert _out_ovr == ["Halo Han Muchen"], _out_ovr
 assert "Han Muchen" in _seen_req["data"] and "韩沐宸" not in _seen_req["data"], _seen_req["data"]
 assert g["apply_name_overrides"]("温薏和闺蜜") == "Wen Yi和sahabat"
+assert g["apply_name_overrides"]("瘟疫") == "Wen Yi"
 print("CELL TRANSLATE NAME OVERRIDE OK")
 
 exec(compile(open(os.path.join(SRC, "nb_new_render.py"), encoding="utf-8").read(), "rd", "exec"), g)
@@ -404,6 +415,20 @@ _hard_big = os.path.join(out, "episodes_hardsub_id", "big_id_hardsub.mp4")
 g["render_hardsub"](_big, _hard_big, _segs_big, 1920, 1080)
 assert g["probe"](_hard_big)[1:] == (1280, 720), g["probe"](_hard_big)
 print("CELL OUTPUT 720P OK")
+
+# Sub Indo mode=none (V0) harus di bawah video, bukan tengah band Mandarin
+# (2026-11-28: margin_v=602 menimpa band 0.63-0.718 di ep 1).
+_band1 = (0.169, 0.63, 0.831, 0.718)
+_mv_static = g["subtitle_margin_v"]("static", _band1, 1080, 1920, 45)
+assert 595 <= _mv_static <= 605, _mv_static  # tengah band (~602 di ep 1)
+assert g["subtitle_margin_v"]("dynamic", _band1, 1080, 1920, 45) == _mv_static
+assert g["subtitle_margin_v"]("none", _band1, 1080, 1920, 45) == 115
+assert g["subtitle_margin_v"]("none", None, 1080, 1920, 45) == 115
+_hard_none = os.path.join(out, "episodes_hardsub_id", "big_none_id_hardsub.mp4")
+g["render_hardsub"](_big, _hard_none, _segs_big, 1920, 1080, mode="none")
+_ass_none = open(os.path.join(g["WORK_DIR"], "big_none_id_hardsub.ass"), encoding="utf-8").read()
+assert ",30,30,64,1" in _ass_none, _ass_none
+print("CELL SUB MARGIN NONE OK")
 
 # Kartu nama/peran dibuang di cell Translate (definisi unconditional)
 _card = {"start": 119.0, "end": 121.0, "text_zh": "丰宸集团总裁", "bbox": [0.05, 0.50, 0.12, 0.65]}

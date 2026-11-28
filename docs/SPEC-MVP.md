@@ -35,6 +35,8 @@ Colab, dengan komputasi di GPU remote (Colab T4).
 | D13 | Profil per device | Satu kode, setting per device di `profiles.yaml` (colab, kaggle, pc, vm, instabox — Termux sengaja tidak ada, tidak direkomendasikan). Notebook: pilih PROFILE di cell config, atau `build_colab_nb.py --profile kaggle` (Colab 25 cell, Kaggle 24 cell; judul section jadi markdown cell, PROFILES di cell tersendiri yang pretty-print). Lokal: `local_pipeline.py --profile pc`. Ganti profil = fingerprint berubah = cache/checkpoint lama tidak dipakai |
 | D14 | Re-scan baris hilang | Segmen Whisper-only di-OCR ulang dengan sampling rapat 0,25 dtk (interval ±0,2 dtk) + upscale 4; yang pulih jadi source=`ocr-rescan`, yang tidak pulih tetap `asr`. Parameter (`RESCAN_STEP/PAD/UPSCALE/MIN_DUR`) ikut fingerprint Whisper |
 | D15 | Batch per sesi | 20–30 episode per sesi Colab (pola pakai, bukan kode; `MAX_EPISODES` default 200 hanya batas atas). Sesi Colab gratis punya batas waktu/GPU, jadi bagi job besar jadi beberapa sesi; checkpoint per episode + fingerprint membuat resume aman |
+| D16 | Posisi sub Indo | Mode blur (static/dynamic): sub Indo di tengah band Mandarin (blur menutupi teks aslinya). Mode `none` (V0): sub Indo di bawah video (`margin_v = vh*0.06`, y ~0,92) — karena tanpa blur teks Mandarin tetap terlihat dan posisi tengah band menimpanya (ditemukan di ep 1, 2026-11-28: margin_v=602 menimpa band 0,63–0,718) |
+| D17 | Kredit + homofon nama | Kartu kredit (`字幕by...`) dibuang di `normalize_segments` (bukan dialog) dan ikut fingerprint Whisper (`credit_filter`), supaya episode yang sudah difusi ikut dibersihkan saat re-run. Homofon nama: `瘟疫` (Whisper salah dengar `温薏`) ikut di-override jadi `Wen Yi` di `NAME_OVERRIDES` |
 
 ## 3. Ruang lingkup MVP
 

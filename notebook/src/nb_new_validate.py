@@ -91,6 +91,12 @@ def _wrap_text(text, max_len=MAX_CHARS_PER_LINE):
     return lines
 
 
+def _is_credit_line(text):
+    """Kartu kredit (mis. '字幕by索兰娅') bukan dialog — buang.
+    Pola sempit: kata '字幕' diikuti 'by' (nama pembuat subtitle)."""
+    return "字幕by" in (text or "").lower().replace(" ", "")
+
+
 def normalize_segments(segs):
     """Rapikan segmen supaya lolos validator. Return (segs_baru, stats).
 
@@ -101,6 +107,7 @@ def normalize_segments(segs):
     - Bungkus teks (text_zh dan text_id) ke maks 42 karakter/baris.
       Kalau setelah dibungkus masih > 2 baris, segmen dipecah jadi
       dua segmen dengan durasi dibagi dua.
+    - Kartu kredit (mis. '字幕by索兰娅') dibuang, bukan dialog.
     """
     stats = {"trimmed": 0, "dropped": 0, "wrapped": 0, "split": 0}
     ordered = sorted(segs, key=lambda s: (float(s.get("start", 0.0)),
@@ -110,6 +117,9 @@ def normalize_segments(segs):
         s = dict(s)
         start = float(s.get("start", 0.0))
         end = float(s.get("end", 0.0))
+        if _is_credit_line(s.get("text_zh") or ""):
+            stats["dropped"] += 1
+            continue
         if not end > start:
             stats["dropped"] += 1
             continue

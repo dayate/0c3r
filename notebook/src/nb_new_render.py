@@ -62,6 +62,11 @@ if "assert_valid_segments" not in globals() or "normalize_segments" not in globa
             lines.append(cur)
         return lines
 
+    def _is_credit_line(text):
+        """Kartu kredit (mis. '字幕by索兰娅') bukan dialog — buang.
+        Pola sempit: kata '字幕' diikuti 'by' (nama pembuat subtitle)."""
+        return "字幕by" in (text or "").lower().replace(" ", "")
+
     def normalize_segments(segs):
         """Rapikan segmen: potong overlap, bungkus baris > 42 char,
         pecah segmen yang teksnya tetap > 2 baris. Return (segs, stats)."""
@@ -73,6 +78,9 @@ if "assert_valid_segments" not in globals() or "normalize_segments" not in globa
             s = dict(s)
             start = float(s.get("start", 0.0))
             end = float(s.get("end", 0.0))
+            if _is_credit_line(s.get("text_zh") or ""):
+                stats["dropped"] += 1
+                continue
             if not end > start:
                 stats["dropped"] += 1
                 continue
@@ -333,6 +341,18 @@ def output_size(vw, vh):
             max(2, int(round(vh * f / 2.0)) * 2))
 
 
+def subtitle_margin_v(mode, band, vw, vh, font_size):
+    """MarginV ASS: mode blur (static/dynamic) menaruh sub Indo di tengah
+    band Mandarin (blur menutupi teks aslinya, sub menggantikannya di
+    tempat yang sama); mode=none (V0, tanpa blur) menaruh sub di bawah
+    video (area subtitle umum) supaya tidak menimpa teks Mandarin yang
+    tetap terlihat (2026-11-28: margin_v=602 menimpa band 0.63-0.718)."""
+    if mode == "none" or not band:
+        return int(vh * 0.06)
+    center_y = (band[1] + band[3]) / 2
+    return max(8, int(round((1 - center_y) * vh - font_size * 0.55)))
+
+
 def render_hardsub(vid_path, out_mp4, segs, vw, vh, mode=None):
     mode = mode or BLUR_MODE
     out_size = output_size(vw, vh)
@@ -346,11 +366,7 @@ def render_hardsub(vid_path, out_mp4, segs, vw, vh, mode=None):
           f"always={ALWAYS_BLUR}", flush=True)
 
     font_size = max(20, round(vw * 0.042))
-    if band:
-        center_y = (band[1] + band[3]) / 2
-        margin_v = max(8, int(round((1 - center_y) * vh - font_size * 0.55)))
-    else:
-        margin_v = int(vh * 0.06)
+    margin_v = subtitle_margin_v(mode, band, vw, vh, font_size)
 
     ass_path = os.path.join(WORK_DIR, os.path.splitext(os.path.basename(out_mp4))[0] + ".ass")
     write_ass(segs, ass_path, vw, vh, font_size, margin_v)

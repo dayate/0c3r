@@ -137,6 +137,16 @@ kept, n_cards = lp.drop_name_cards([card, good[0]])
 assert n_cards == 1 and len(kept) == 1, (n_cards, kept)
 print("NAME CARD OK")
 
+# --- kartu kredit bukan dialog (2026-11-28) ---
+assert lp._is_credit_line("字幕by索兰娅")
+assert lp._is_credit_line("字幕 by 索兰娅")
+assert not lp._is_credit_line("你好吗")
+_cred = [{"start": 156.0, "end": 158.0, "text_zh": "字幕by索兰娅", "text_id": "Subtitel oleh Solanya"},
+         {"start": 1.0, "end": 2.0, "text_zh": "你好", "text_id": "Halo"}]
+_fixed_c, _ns_c = lp.normalize_segments(_cred)
+assert len(_fixed_c) == 1 and _fixed_c[0]["text_zh"] == "你好" and _ns_c["dropped"] == 1, (_fixed_c, _ns_c)
+print("CREDIT FILTER OK")
+
 # --- blur dynamic: jendela ber-padding, radius/power baru, segmen tanpa bbox pakai band ---
 # (radius config 20, tapi dibatasi setengah tinggi crop: 32px -> 15)
 assert lp.BLUR_RADIUS == 20
@@ -164,6 +174,19 @@ out_none = os.path.join(td, "out_none.mp4")
 enc_n, t_n = lp.render_hardsub(src, "", out_none, segs, 640, 360, blur_mode="none")
 assert os.path.getsize(out_none) > 0
 print("BLUR NONE OK", enc_n, round(t_n, 2), "s", os.path.getsize(out_none), "bytes")
+
+# --- sub margin V0 (2026-11-28): mode=none -> bawah video, bukan tengah band ---
+_band1 = (0.169, 0.63, 0.831, 0.718)
+_mv_static = lp.subtitle_margin_v("static", _band1, 1080, 1920, 45)
+assert 595 <= _mv_static <= 605, _mv_static  # tengah band (~602 di ep 1)
+assert lp.subtitle_margin_v("dynamic", _band1, 1080, 1920, 45) == _mv_static
+assert lp.subtitle_margin_v("none", _band1, 1080, 1920, 45) == 115
+assert lp.subtitle_margin_v("none", None, 1080, 1920, 45) == 115
+out_mv = os.path.join(td, "out_mv.mp4")
+lp.render_hardsub(src, "", out_mv, segs, 640, 360, blur_mode="none")
+_ass_mv = open(os.path.join(lp.WORK_DIR, "out_mv.ass"), encoding="utf-8").read()
+assert ",30,30,21,1" in _ass_mv, _ass_mv
+print("SUB MARGIN NONE OK")
 
 # --- output 720p (2026-11-28): video 1920x1080 -> 1280x720 ---
 big = os.path.join(td, "big.mp4")
@@ -218,6 +241,7 @@ finally:
 assert _out2 == ["Halo Han Muchen"], _out2
 assert "Han Muchen" in _seen2["data"] and "韩沐宸" not in _seen2["data"], _seen2["data"]
 assert lp.apply_name_overrides("温薏和闺蜜") == "Wen Yi和sahabat"
+assert lp.apply_name_overrides("瘟疫") == "Wen Yi"
 print("TRANSLATE NAME OVERRIDE OK")
 
 # --- translate: kutip dibersihkan, tanpa polish/fallback LLM ---

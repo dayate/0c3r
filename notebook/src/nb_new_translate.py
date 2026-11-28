@@ -66,6 +66,11 @@ if "assert_valid_segments" not in globals() or "normalize_segments" not in globa
             lines.append(cur)
         return lines
 
+    def _is_credit_line(text):
+        """Kartu kredit (mis. '字幕by索兰娅') bukan dialog — buang.
+        Pola sempit: kata '字幕' diikuti 'by' (nama pembuat subtitle)."""
+        return "字幕by" in (text or "").lower().replace(" ", "")
+
     def normalize_segments(segs):
         """Rapikan segmen: potong overlap, bungkus baris > 42 char,
         pecah segmen yang teksnya tetap > 2 baris. Return (segs, stats)."""
@@ -77,6 +82,9 @@ if "assert_valid_segments" not in globals() or "normalize_segments" not in globa
             s = dict(s)
             start = float(s.get("start", 0.0))
             end = float(s.get("end", 0.0))
+            if _is_credit_line(s.get("text_zh") or ""):
+                stats["dropped"] += 1
+                continue
             if not end > start:
                 stats["dropped"] += 1
                 continue

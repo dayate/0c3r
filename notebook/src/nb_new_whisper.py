@@ -108,6 +108,7 @@ def _whisper_fingerprint():
         "rescan_pad": RESCAN_PAD,
         "rescan_upscale": RESCAN_UPSCALE,
         "rescan_min_dur": RESCAN_MIN_DUR,
+        "credit_filter": 1,
     }
 
 
