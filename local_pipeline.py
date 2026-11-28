@@ -4,23 +4,29 @@
 HANYA UNTUK TESTING. Jalur utama adalah notebook Colab (notebook/src/).
 File ini adalah cermin untuk testing lokal, bukan sumber kebenaran.
 
-Alur per episode: probe -> extract frame (fps sampling) -> OCR (ROI, gated, batched)
-+ Whisper timing (model kecil, paralel dengan OCR) -> fusi OCR+Whisper
--> dedupe jadi segmen -> translate (gratis DeepL -> Google -> MyMemory, LLM fallback)
--> SRT zh/id -> render hardsub (blur band subtitle + burn sub ID, satu pass).
+Alur per episode: probe -> decode frame langsung dari ffmpeg (rawvideo, tanpa PNG)
+-> OCR (ROI, gated, frame identik dilewati) + Whisper timing (model kecil,
+paralel dengan OCR) -> fusi OCR+Whisper -> dedupe jadi segmen -> translate
+gratis saja (DeepL -> Google -> MyMemory, tanpa LLM) -> SRT zh/id
+-> render hardsub (blur band subtitle + burn sub ID, satu pass).
 
-Metode cepat (2026-11-27): Whisper HANYA untuk timing, jadi model kecil
-("small", beam 1/greedy) sudah cukup — ~4-6x lebih cepat dari large-v3-turbo
-di CPU. OCR 0.5 fps (timing kasar diperbaiki fusi Whisper). OCR + Whisper
-jalan paralel (thread). Render libx264 preset veryfast (NVENC dulu kalau ada).
+Metode cepat (2026-11-28): frame dibaca sebagai rawvideo dari pipe, jadi tidak
+ada PNG sementara di disk; frame yang ROI-nya identik dengan frame sebelumnya
+tidak di-OCR ulang. Translate lokal gratis saja — baris yang gagal di semua
+translator gratis membuat episode berhenti + review.json (SRT ID tetap tidak
+boleh berisi baris Mandarin). Render SENGAJA tidak diubah (libx264 veryfast
+CRF 23) supaya video output sama persis dengan versi sebelumnya.
+
+Whisper HANYA untuk timing, jadi model kecil ("small", beam 1/greedy) cukup —
+~4-6x lebih cepat dari large-v3-turbo di CPU. OCR 0.5 fps (timing kasar
+diperbaiki fusi Whisper). OCR + Whisper jalan paralel (thread).
 
 Input  : ./input/*.mp4
 Output : ./output/per_episode/  ./output/hardsub/  ./output/merged/
 Kerja  : ./work/frames|chunks|cache   Log: ./log.txt
 
 Env:
-  TIPROUTER_API_KEY  (wajib untuk translate LLM; tanpa ini langsung fallback gratis)
-  DEEPL_API_KEY      (opsional, fallback kedua)
+  DEEPL_API_KEY      (opsional; tanpa ini langsung Google -> MyMemory)
 
 Contoh:  .venv\\Scripts\\python.exe local_pipeline.py --limit 1
          .venv\\Scripts\\python.exe local_pipeline.py --profile vm --limit 1
@@ -39,8 +45,6 @@ import shutil
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
 import wave
 from concurrent.futures import ThreadPoolExecutor
 
@@ -95,7 +99,7 @@ def load_profiles():
 def apply_profile(name):
     global PROFILE, FPS, ROI, MIN_CONF, UPSCALE, MAX_WIDTH, BATCH_SIZE, MIN_DUR
     global WHISPER_MODEL, WHISPER_BEAM, BLUR_MODE, BLUR_RADIUS, BLUR_TIME_PAD, ALWAYS_BLUR
-    global OCR_ENGINE
+    global OCR_ENGINE, CRF
     profiles = load_profiles()
     if name not in profiles:
         raise ValueError(
@@ -128,6 +132,9 @@ def apply_profile(name):
                         # dynamic: jendela blur diperlebar ±0.4 detik supaya
                         # tidak miss kalau timing OCR meleset sedikit
     ALWAYS_BLUR = bool(CFG.get("ALWAYS_BLUR", p.get("always_blur", True)))
+    CRF = int(CFG.get("CRF") or p.get("crf") or 23)
+                        # 23 = kualitas lama (23 MB/episode); 26 = 16,6 MB,
+                        # 28 = 13,4 MB (diukur 2026-11-28, episode 158 dtk)
 
 
 # Default bawaan (profil pc) — dipakai kalau profiles.yaml / PyYAML tidak ada.
@@ -145,7 +152,9 @@ WHISPER_BEAM = int(CFG.get("WHISPER_BEAM") or 1)  # 1 = greedy, tercepat
 BLUR_MODE = "dynamic"
 BLUR_RADIUS = 20
 BLUR_TIME_PAD = 0.4
+CRF = int(CFG.get("CRF") or 23)
 ALWAYS_BLUR = True
+DYNAMIC_MAX_BOX = 8     # di atas ini dynamic terlalu lambat (1 overlay per baris)
 try:
     apply_profile(PROFILE)
 except Exception:
@@ -167,12 +176,7 @@ BLUR_PAD_Y = 0.012
 PROGRESS_PCT = 10       # print progress ffmpeg tiap N persen
 FONT_NAME = "Arial"
 
-LLM_URL = "https://tiprouter.my.id/v1/chat/completions"
-LLM_MODELS = ["auto", "deepseek-v4.1-flash-1017"]  # diuji: hanya ini yang tersedia di akun
-LLM_BATCH = 20          # segmen per request
-LLM_TIMEOUT = 180
 FREE_DELAY = 0.5        # jeda antar request translator gratis
-POLISH_WITH_LLM = True  # polish baris MyMemory/Google lewat LLM (butuh TIPROUTER_API_KEY)
 
 MAX_OUTPUT_MB = 0       # 0 = nonaktif; >0 = peringatan keras di log kalau output lebih besar
 
@@ -413,12 +417,40 @@ def fingerprint():
             "max_width": MAX_WIDTH, "gate": TEXT_GATE, "gate_min": TEXT_GATE_MIN_BRIGHT}
 
 
-def load_crop(path):
-    """Frame -> (array ROI siap OCR, w, h, crop_w, crop_h, ada_teks)."""
+_SHAPE_CACHE = {}
+
+
+def _frame_shape(vid_path):
+    """(w, h) frame yang benar-benar keluar dari ffmpeg (sudah autorotate).
+
+    ffprobe width/height bisa tertukar untuk video ber-rotasi, jadi ukuran
+    dipastikan dari 1 frame rawvideo. Hasil di-cache per file.
+    """
+    cached = _SHAPE_CACHE.get(vid_path)
+    if cached:
+        return cached
+    r = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", vid_path, "-frames:v", "1",
+         "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"],
+        capture_output=True)
+    n = len(r.stdout)
+    _, w, h = probe(vid_path)
+    if w and h and w * h * 3 == n:
+        shape = (w, h)
+    elif w and h and h * w * 3 == n:
+        shape = (h, w)
+    else:
+        raise RuntimeError(f"ukuran frame tidak dikenali ({n} bytes): {vid_path}")
+    _SHAPE_CACHE[vid_path] = shape
+    return shape
+
+
+def load_crop(frame):
+    """Frame RGB (ndarray) -> (array ROI siap OCR, w, h, crop_w, crop_h, ada_teks)."""
     import numpy as np
     from PIL import Image
 
-    img = Image.open(path).convert("RGB")
+    img = Image.fromarray(frame)
     w, h = img.size
     if MAX_WIDTH and w > MAX_WIDTH:
         img = img.resize((MAX_WIDTH, int(h * MAX_WIDTH / w)), Image.LANCZOS)
@@ -483,34 +515,71 @@ def ocr_batch(engine, frames):
     return results
 
 
-def ocr_chunk(vid_path, start, dur, out_json):
-    """Extract + OCR satu chunk, simpan checkpoint. Return list segmen."""
-    fd = os.path.join(FRAME_DIR, out_json.rsplit(os.sep, 1)[-1].replace(".json", ""))
-    shutil.rmtree(fd, ignore_errors=True)
-    os.makedirs(fd, exist_ok=True)
+def _frame_sig(arr):
+    """Tanda pengenal murah: ROI diperkecil 16x. Isi sama -> sig sama."""
+    return arr[::16, ::16].tobytes()
 
-    t0 = time.time()
-    subprocess.run(
-        ["ffmpeg", "-y", "-v", "error", "-ss", f"{start:.3f}", "-t", f"{dur:.3f}", "-i", vid_path,
-         "-vf", f"fps={FPS}", "-start_number", "0", os.path.join(fd, "f_%06d.png")],
-        check=True, capture_output=True)
-    frames = sorted(glob.glob(os.path.join(fd, "f_*.png")))
-    t_extract = time.time() - t0
+
+def ocr_chunk(vid_path, start, dur, out_json):
+    """Decode + OCR satu chunk, simpan checkpoint. Return list segmen."""
+    import numpy as np
+
+    w, h = _frame_shape(vid_path)
+    nbytes = w * h * 3
+    cmd = ["ffmpeg", "-v", "error", "-ss", f"{start:.3f}", "-t", f"{dur:.3f}",
+           "-i", vid_path, "-vf", f"fps={FPS}", "-f", "rawvideo",
+           "-pix_fmt", "rgb24", "pipe:1"]
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
     engine = get_engine()
-    t0 = time.time()
     parsed = []
-    for i in range(0, len(frames), BATCH_SIZE):
-        batch = frames[i:i + BATCH_SIZE]
-        prepared, keep = [], []
-        for f in batch:
-            arr, w, h, cw, ch, gate = load_crop(f)
-            prepared.append((arr, cw, ch))
-            keep.append((f, w, h, gate))
-        outs = ocr_batch(engine, prepared) if any(k[3] for k in keep) else [("", None)] * len(batch)
-        for (f, w, h, gate), (txt, box) in zip(keep, outs):
-            parsed.append((txt if gate else "", box, w, h))
-    t_ocr = time.time() - t0
+    buf = []                       # (arr, cw, ch, w, h, gate) menunggu ocr_batch
+    prev_sig, prev_out = None, ("", None)
+    nframes = 0
+    t_read = 0.0
+    t_loop = time.time()
+
+    def flush():
+        nonlocal prev_out
+        if not buf:
+            return
+        outs = (ocr_batch(engine, [(b[0], b[1], b[2]) for b in buf])
+                if any(b[5] for b in buf) else [("", None)] * len(buf))
+        for (arr, cw, ch, fw, fh, gate), (txt, box) in zip(buf, outs):
+            out = (txt if gate else "", box)
+            parsed.append((out[0], out[1], fw, fh))
+            prev_out = out
+        buf.clear()
+
+    try:
+        while True:
+            t0 = time.time()
+            raw = p.stdout.read(nbytes)
+            t_read += time.time() - t0
+            if len(raw) < nbytes:
+                break
+            nframes += 1
+            arr, fw, fh, cw, ch, gate = load_crop(
+                np.frombuffer(raw, np.uint8).reshape(h, w, 3))
+            sig = _frame_sig(arr)
+            if prev_sig is not None and sig == prev_sig:
+                # ROI identik dengan frame sebelumnya -> hasil OCR pasti sama.
+                flush()
+                parsed.append((prev_out[0] if gate else "", prev_out[1], fw, fh))
+                continue
+            prev_sig = sig
+            buf.append((arr, cw, ch, fw, fh, gate))
+            if len(buf) >= BATCH_SIZE:
+                flush()
+        flush()
+    finally:
+        p.stdout.close()
+        rc = p.wait()
+    if rc != 0:
+        raise RuntimeError(f"ffmpeg decode gagal: {os.path.basename(vid_path)} "
+                           f"chunk {start:.0f}s")
+    t_extract = t_read
+    t_ocr = time.time() - t_loop - t_read
 
     # gabung frame berurutan dengan teks sama -> segmen
     segs, cur_text, cur_start, cur_boxes = [], None, None, []
@@ -536,12 +605,11 @@ def ocr_chunk(vid_path, start, dur, out_json):
                      "text_zh": cur_text, "bbox": _merge_boxes(cur_boxes)})
 
     segs = [s for s in segs if s["end"] - s["start"] >= MIN_DUR]
-    write_json_atomic(out_json, {"start": start, "end": start + dur, "frames": len(frames),
+    write_json_atomic(out_json, {"start": start, "end": start + dur, "frames": nframes,
                                  "fingerprint": fingerprint(), "segments": segs})
-    log.info("[ocr] chunk %s..%ss frames=%d berteks=%d segmen=%d extract=%.1fs ocr=%.1fs",
-             f"{start:.0f}", f"{start + dur:.0f}", len(frames),
+    log.info("[ocr] chunk %s..%ss frames=%d berteks=%d segmen=%d decode=%.1fs ocr=%.1fs",
+             f"{start:.0f}", f"{start + dur:.0f}", nframes,
              sum(1 for p in parsed if p[0]), len(segs), t_extract, t_ocr)
-    shutil.rmtree(fd, ignore_errors=True)
     return segs, t_extract, t_ocr
 
 
@@ -928,50 +996,6 @@ def save_cache():
     write_json_atomic(os.path.join(CACHE_DIR, "translate_cache_prov.json"), _cache_prov)
 
 
-def _strip_json(txt):
-    txt = txt.strip()
-    if txt.startswith("```"):
-        txt = re.sub(r"^```[a-zA-Z]*\n?", "", txt).rstrip("`").strip()
-    i, j = txt.find("["), txt.rfind("]")
-    return txt[i:j + 1] if i >= 0 and j > i else txt
-
-
-def llm_translate(lines, system=None):
-    api_key = (os.environ.get("TIPROUTER_API_KEY") or "").strip()
-    if not api_key:
-        return None
-    system = system or ("Kamu penerjemah subtitle drama Mandarin ke bahasa Indonesia. "
-              "Terjemahkan tiap baris secara natural dan ringkas, jangan menambah penjelasan. "
-              "Balas HANYA JSON array of string, jumlah dan urutan sama dengan input.")
-    body = {"temperature": 0.2,
-            "messages": [{"role": "system", "content": system},
-                         {"role": "user", "content": json.dumps(lines, ensure_ascii=False)}]}
-    for model in LLM_MODELS:
-        for attempt in range(2):
-            payload = dict(body, model=model)
-            req = urllib.request.Request(
-                LLM_URL, data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json",
-                         "Authorization": "Bearer " + api_key})
-            try:
-                with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as r:
-                    resp = json.loads(r.read().decode("utf-8"))
-                out = json.loads(_strip_json(resp["choices"][0]["message"]["content"]))
-                if isinstance(out, list) and len(out) == len(lines):
-                    return [str(x).strip() for x in out]
-                log.warning("LLM %s: jumlah baris tidak cocok", model)
-            except urllib.error.HTTPError as e:
-                log.warning("LLM %s HTTP %s", model, e.code)
-                if e.code in (429, 500, 502, 503):
-                    time.sleep(2.0 * (attempt + 1))
-                    continue
-                break
-            except Exception as e:
-                log.warning("LLM %s gagal: %s: %s", model, type(e).__name__, str(e)[:120])
-                time.sleep(1.0)
-    return None
-
-
 def deepl_translate(text):
     global _deepl
     key = (os.environ.get("DEEPL_API_KEY") or "").strip()
@@ -1013,14 +1037,6 @@ def google_translate(text):
     return None, None
 
 
-def llm_translate_single(text):
-    """Retry per baris lewat LLM. Return teks Indonesia atau None."""
-    out = llm_translate([text])
-    if out and out[0] and out[0] != text and not has_mandarin(out[0]):
-        return out[0]
-    return None
-
-
 def _clean_id(text):
     """Bersihkan hasil terjemah: buang tanda kutip yang membungkus seluruh
     baris dan spasi ganda. Makna tidak diubah."""
@@ -1028,16 +1044,6 @@ def _clean_id(text):
     if len(text) >= 2 and text[0] in "\"“”'" and text[-1] in "\"“”'":
         text = text[1:-1].strip()
     return " ".join(text.split())
-
-
-def llm_polish(lines):
-    """Polish terjemahan Indonesia supaya natural seperti dialog drama."""
-    system = ("Kamu editor subtitle drama. Perbaiki terjemahan Indonesia ini "
-              "supaya natural seperti dialog sehari-hari, jangan kaku, jangan "
-              "ubah makna, jangan tambah atau buang informasi, jangan tambah "
-              "tanda kutip. Balas HANYA JSON array of string, jumlah dan "
-              "urutan sama dengan input.")
-    return llm_translate(lines, system=system)
 
 
 def is_name_card(text, bbox):
@@ -1068,10 +1074,11 @@ def drop_name_cards(segs):
 
 
 def translate_segments(segs):
-    """Gratis dulu (DeepL -> Google -> MyMemory), sisa gagal baru LLM batch,
-    lalu LLM per baris. Return (segs, failed_list).
+    """Translate gratis saja: DeepL -> Google -> MyMemory, tanpa LLM.
 
-    Jaminan: tidak ada baris yang dibiarkan Mandarin di text_id.
+    Return (segs, failed_list). Jaminan tetap: tidak ada baris Mandarin di
+    text_id. Baris yang gagal di semua translator gratis masuk failed_list;
+    process_episode menulis review.json lalu menghentikan episode.
     """
     todo = []
     n_passthrough = 0
@@ -1095,7 +1102,7 @@ def translate_segments(segs):
         print(f"  [tr] {n_passthrough} baris non-Mandarin diteruskan apa adanya", flush=True)
 
     uniq = list(dict.fromkeys(todo))
-    stats = {"deepl": 0, "google": 0, "mymemory": 0, "llm": 0, "polish": 0}
+    stats = {"deepl": 0, "google": 0, "mymemory": 0}
     prov_of = {}
     failed = []
     for n, zh in enumerate(uniq, 1):
@@ -1119,58 +1126,8 @@ def translate_segments(segs):
     save_cache()
 
     if failed:
-        log.warning("[tr] %d baris -> LLM fallback", len(failed))
-        for i in range(0, len(failed), LLM_BATCH):
-            chunk = failed[i:i + LLM_BATCH]
-            out = llm_translate(chunk)
-            if out:
-                for zh, id_ in zip(chunk, out):
-                    if id_ and id_ != zh and not has_mandarin(id_):
-                        _cache[zh] = id_
-                        _cache_prov[zh] = "llm"
-                        stats["llm"] += 1
-            log.info("[tr] LLM %d/%d", min(i + LLM_BATCH, len(failed)), len(failed))
-            save_cache()
-
-    still_failed = [zh for zh in failed
-                    if zh not in _cache or has_mandarin(_cache.get(zh, zh))]
-    if still_failed:
-        log.warning("[tr] %d baris -> LLM per baris (retry terakhir)", len(still_failed))
-        for n, zh in enumerate(still_failed, 1):
-            out = llm_translate_single(zh)
-            if out:
-                _cache[zh] = out
-                _cache_prov[zh] = "llm"
-                stats["llm"] += 1
-            if n % 5 == 0:
-                save_cache()
-        save_cache()
-
-    # Polish LLM: baris dari MyMemory/Google/cache lama ditulis ulang supaya
-    # natural. DeepL tidak ikut; baris yang sudah di-polish ditandai supaya
-    # tidak di-polish lagi di run berikutnya.
-    if POLISH_WITH_LLM and (os.environ.get("TIPROUTER_API_KEY") or "").strip():
-        all_zh = list(dict.fromkeys(
-            (s.get("text_zh") or "").strip() for s in segs
-            if (s.get("text_zh") or "").strip()))
-        cands = [zh for zh in all_zh
-                 if _cache_prov.get(zh) in (None, "mymemory", "google")
-                 and _cache.get(zh) and not has_mandarin(_cache[zh])]
-        if cands:
-            log.info("[tr] polish LLM %d baris (MyMemory/Google/cache lama)", len(cands))
-            for i in range(0, len(cands), LLM_BATCH):
-                chunk = cands[i:i + LLM_BATCH]
-                out = llm_polish([_cache[zh] for zh in chunk])
-                if out:
-                    for zh, id_ in zip(chunk, out):
-                        old = _cache[zh]
-                        if (id_ and id_ != old and not has_mandarin(id_)
-                                and 0.5 * len(old) <= len(id_) <= 2.0 * len(old)):
-                            _cache[zh] = _clean_id(id_)
-                            _cache_prov[zh] = "polished"
-                            stats["polish"] += 1
-                log.info("[tr] polish %d/%d", min(i + LLM_BATCH, len(cands)), len(cands))
-            save_cache()
+        log.warning("[tr] %d baris gagal di semua translator gratis "
+                    "(tanpa LLM -> masuk review.json)", len(failed))
 
     for s in segs:
         zh = (s.get("text_zh") or "").strip()
@@ -1184,9 +1141,9 @@ def translate_segments(segs):
                      "reason": "all_providers_failed"}
                     for s in segs
                     if (s.get("text_zh") or "").strip() and not s.get("text_id")]
-    log.info("[tr] DeepL=%d Google=%d MyMemory=%d LLM=%d polish=%d gagal=%d | %d/%d segmen",
-             stats["deepl"], stats["google"], stats["mymemory"], stats["llm"],
-             stats["polish"], len(failed_final), done, len(segs))
+    log.info("[tr] DeepL=%d Google=%d MyMemory=%d gagal=%d | %d/%d segmen",
+             stats["deepl"], stats["google"], stats["mymemory"],
+             len(failed_final), done, len(segs))
     return segs, failed_final
 
 
@@ -1274,9 +1231,11 @@ def build_blur(segs, band, vw, vh, mode):
     static: satu rect fixed; ALWAYS_BLUR=True -> overlay selalu nyala (OCR miss aman),
     False -> hanya pada window tiap segmen. dynamic: rect per segmen (paling presisi)."""
     def blur(h):
-        r = max(2, min(BLUR_RADIUS, h // 2 - 1))
-        return (f"boxblur=luma_radius={r}:luma_power=3:"
-                f"chroma_radius={max(1, r // 2)}:chroma_power=2")
+        # gblur: gumpalan halus, bukan kotak-kotak boxblur power 3 yang terlihat
+        # seperti awan abu-abu. Sigma = radius/2 -> 10 untuk band 118px: teks
+        # 45px sudah tidak terbaca, background masih kelihatan.
+        s = max(2, min(BLUR_RADIUS, h // 2 - 1)) / 2
+        return f"gblur=sigma={s:.1f}:steps=1"
 
     if mode == "dynamic":
         chain, cur = [], "[0:v]"
@@ -1339,9 +1298,20 @@ def run_ffmpeg(cmd, dur, tag):
     return p.returncode, err
 
 
+def _blur_mode_for(segs, mode):
+    """dynamic = 1 overlay ffmpeg per baris subtitle, jadi biayanya linear
+    dengan jumlah baris. Di atas DYNAMIC_MAX_BOX itu tidak realistis di CPU
+    (37 baris > 1 jam), jadi dipaksa static (1 overlay band)."""
+    if mode == "dynamic" and len(segs) > DYNAMIC_MAX_BOX:
+        log.warning("[blur] %d segmen > %d -> dynamic dipaksa static "
+                    "(overlay per baris terlalu lambat)", len(segs), DYNAMIC_MAX_BOX)
+        return "static"
+    return mode
+
+
 def render_hardsub(vid_path, srt_path, out_mp4, segs, vw, vh, blur_mode=None):
     # None = baca global saat dipanggil (default arg statis tidak ikut --blur)
-    blur_mode = blur_mode or BLUR_MODE
+    blur_mode = _blur_mode_for(segs, blur_mode or BLUR_MODE)
     use_nvenc = has_nvenc()
     band = compute_band(segs, vh)
     log.info("[blur] band=%s mode=%s segmen=%d radius=%d always=%s",
@@ -1379,7 +1349,7 @@ def render_hardsub(vid_path, srt_path, out_mp4, segs, vw, vh, blur_mode=None):
     variants = []
     if use_nvenc:
         variants.append(["-c:v", "h264_nvenc", "-preset", "p6", "-cq", "24"])
-    variants.append(["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"])
+    variants.append(["-c:v", "libx264", "-preset", "veryfast", "-crf", str(CRF)])
 
     dur = probe(vid_path)[0]
     t0 = time.time()
@@ -1404,6 +1374,13 @@ def render_hardsub(vid_path, srt_path, out_mp4, segs, vw, vh, blur_mode=None):
 
 
 # ───────────────────────── pipeline ─────────────────────────
+def _hardsub_ok(path):
+    """MP4 dianggap jadi hanya kalau terbaca dan ada durasinya. Render yang
+    dibatalkan meninggalkan file beberapa puluh byte yang dulu dianggap
+    selesai (2026-11-28), sehingga render tidak pernah diulang."""
+    return os.path.exists(path) and probe(path)[0] > 0
+
+
 def process_episode(vid_path, render):
     stem = os.path.splitext(os.path.basename(vid_path))[0]
     ep_json = os.path.join(PER_EP_DIR, f"{stem}_ocr.json")
@@ -1491,7 +1468,7 @@ def process_episode(vid_path, render):
         write_srt(segs, zh_srt, "text_zh")
         write_srt(segs, id_srt, "text_id")
 
-    if render and not os.path.exists(out_mp4):
+    if render and not _hardsub_ok(out_mp4):
         assert_valid_segments(segs, where=f"render {stem}")
         _, t_render = render_hardsub(vid_path, id_srt, out_mp4, segs, vw, vh)
         timings["render"] = t_render

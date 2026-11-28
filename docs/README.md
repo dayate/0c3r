@@ -14,6 +14,7 @@ Dokumen di folder ini menjabarkan keputusan MVP dan kebutuhan teknis awal. **PRD
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Komponen, alur data, tiga jalur, pemrosesan Colab dan lokal |
 | [PERFORMANCE.md](PERFORMANCE.md) | Riset performa, bukti eksternal, batas klaim dan hal yang belum terukur |
 | [BENCHMARK-PLAN.md](BENCHMARK-PLAN.md) | Protokol untuk mengukur end-to-end dan menguji target pada T4 |
+| [REVIEW-2026-11-27.md](REVIEW-2026-11-27.md) | Review kode HEAD `6a59846`: temuan P0/P1/P2, bukti, urutan perbaikan |
 
 ## Keputusan MVP aktif
 

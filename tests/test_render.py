@@ -19,6 +19,14 @@ enc, t = lp.render_hardsub(src, "", out, segs, 640, 360)
 assert os.path.getsize(out) > 0
 print("SMOKE OK", enc, round(t, 2), "s", os.path.getsize(out), "bytes")
 
+# --- render yang dibatalkan meninggalkan mp4 puluhan byte: jangan dianggap selesai ---
+_bad = os.path.join(td, "bad.mp4")
+with open(_bad, "wb") as _f:
+    _f.write(b"\x00" * 48)
+assert not lp._hardsub_ok(_bad), "mp4 rusak tidak boleh dianggap selesai"
+assert lp._hardsub_ok(out), "mp4 valid harus dianggap selesai"
+print("HARDSUB VALID OK")
+
 # filter statis harus tanpa enable= saat ALWAYS_BLUR
 band = lp.compute_band(segs, 360)
 fc, _ = lp.build_blur(segs, band, 640, 360, "static")
@@ -28,7 +36,7 @@ fc2, _ = lp.build_blur(segs, band, 640, 360, "static")
 assert "enable=" in fc2
 print("FILTER OK")
 
-# --- translate: gratis dulu, LLM fallback ---
+# --- translate: gratis saja (DeepL -> Google -> MyMemory), tanpa LLM ---
 lp.TR_CACHE_PATH = os.path.join(td, "cache.json")
 lp._cache.clear()
 calls = []
@@ -39,31 +47,22 @@ def fake_free(t):
 
 lp.deepl_translate = lambda t: None
 lp.google_translate = fake_free
-lp.llm_translate = lambda lines: None
 segs2 = [{"text_zh": "你好"}, {"text_zh": "再见"}, {"text_zh": "你好"}]
 segs2, failed2 = lp.translate_segments(segs2)
 assert failed2 == [], failed2
 assert calls == ["你好", "再见"], calls
 assert segs2[0]["text_id"] == "Halo" and segs2[2]["text_id"] == "Halo"
-
-lp._cache.clear()
-lp.google_translate = lambda t: (None, None)
-lp.llm_translate = lambda lines: ["Tes" for _ in lines]
-segs3 = [{"text_zh": "测试"}]
-segs3, failed3 = lp.translate_segments(segs3)
-assert failed3 == [], failed3
-assert segs3[0]["text_id"] == "Tes", segs3
 print("TRANSLATE OK")
 
-# --- translate: gagal di semua jalur -> masuk daftar gagal, text_id kosong ---
+# --- translate: gagal di semua jalur gratis -> masuk daftar gagal, text_id kosong ---
 lp._cache.clear()
 lp.google_translate = lambda t: (None, None)
-lp.llm_translate = lambda lines: None
 segs4 = [{"text_zh": "你好"}]
 segs4, failed4 = lp.translate_segments(segs4)
 assert len(failed4) == 1 and failed4[0]["text_zh"] == "你好", failed4
 assert segs4[0]["text_id"] == "", segs4
 assert lp.validate_segments(segs4), "validator harus menolak baris belum diterjemah"
+assert not hasattr(lp, "llm_translate"), "versi lokal tidak boleh punya jalur LLM"
 print("TRANSLATE FAIL OK")
 
 # --- translate: baris non-Mandarin diteruskan apa adanya, provider tidak dipanggil ---
@@ -77,7 +76,6 @@ def _deepl_rec(t):
 
 lp.deepl_translate = _deepl_rec
 lp.google_translate = lambda t: (None, None)
-lp.llm_translate = lambda lines: None
 segs_p = [{"text_zh": "ALSURR 120."}, {"text_zh": "你好"}]
 segs_p, failed_p = lp.translate_segments(segs_p)
 assert len(failed_p) == 1 and failed_p[0]["text_zh"] == "你好", failed_p
@@ -130,49 +128,37 @@ print("NAME CARD OK")
 assert lp.BLUR_RADIUS == 20
 lp.ALWAYS_BLUR = True
 fc_dyn, _ = lp.build_blur(segs, band, 640, 360, "dynamic")
-assert "luma_radius=15" in fc_dyn and "luma_power=3" in fc_dyn, fc_dyn
+# gblur (bukan boxblur lagi): h=32 -> sigma 7.5
+assert "gblur=sigma=7.5" in fc_dyn and "boxblur" not in fc_dyn, fc_dyn
 assert "between(t,0.100,1.900)" in fc_dyn, fc_dyn  # 0.5-0.4 s/d 1.5+0.4 s
 no_bbox = [{"start": 0.5, "end": 1.5, "text_zh": "你好", "text_id": "Halo"}]
 fc_nb, _ = lp.build_blur(no_bbox, band, 640, 360, "dynamic")
 assert fc_nb is not None and "between(t,0.100,1.900)" in fc_nb, fc_nb
 print("BLUR DYNAMIC OK")
 
-# --- translate: kutip dibersihkan + polish LLM untuk baris MyMemory ---
-os.environ["TIPROUTER_API_KEY"] = "test-key"
-lp.POLISH_WITH_LLM = True
+# --- guard: dynamic dipaksa static kalau baris banyak (2026-11-28) ---
+_many = [{"start": 0, "end": 1, "text_zh": "x"} for _ in range(lp.DYNAMIC_MAX_BOX + 1)]
+assert lp._blur_mode_for(_many, "dynamic") == "static"
+assert lp._blur_mode_for(_many[:-1], "dynamic") == "dynamic"
+assert lp._blur_mode_for(_many, "static") == "static"
+print("BLUR GUARD OK")
+
+# --- translate: kutip dibersihkan, tanpa polish/fallback LLM ---
 lp._cache.clear()
 lp.deepl_translate = lambda t: None
 lp.google_translate = lambda t: ('"Sudah dipikirkan dengan baik"', "mymemory")
-lp.llm_translate = lambda lines, system=None: ["Aku sudah memutuskannya" for _ in lines]
 segs5 = [{"text_zh": "我想好了"}]
 segs5, failed5 = lp.translate_segments(segs5)
 assert failed5 == [], failed5
-assert segs5[0]["text_id"] == "Aku sudah memutuskannya", segs5
-# Tanpa key LLM, polish dilewati dan kutip tetap dibersihkan
-del os.environ["TIPROUTER_API_KEY"]
-lp._cache.clear()
-segs6 = [{"text_zh": "我想好了"}]
-segs6, failed6 = lp.translate_segments(segs6)
-assert segs6[0]["text_id"] == "Sudah dipikirkan dengan baik", segs6
-print("TRANSLATE POLISH OK")
+assert segs5[0]["text_id"] == "Sudah dipikirkan dengan baik", segs5
+print("TRANSLATE FREE ONLY OK")
 
-# Polish jalan untuk baris cache lama (provider tidak tercatat), sekali saja
-os.environ["TIPROUTER_API_KEY"] = "test-key"
-lp._cache.clear()
-lp._cache_prov.clear()
-lp._cache["我想好了"] = "Sudah dipikirkan dengan baik"
-lp.llm_translate = lambda lines, system=None: ["Aku sudah memutuskannya" for _ in lines]
-segs7 = [{"text_zh": "我想好了"}]
-segs7, _ = lp.translate_segments(segs7)
-assert segs7[0]["text_id"] == "Aku sudah memutuskannya", segs7
-assert lp._cache_prov.get("我想好了") == "polished", lp._cache_prov
-calls7 = []
-lp.llm_translate = lambda lines, system=None: calls7.append(lines) or ["X"]
-segs7b, _ = lp.translate_segments(segs7)
-assert calls7 == [], "baris yang sudah di-polish jangan di-polish lagi"
-assert segs7b[0]["text_id"] == "Aku sudah memutuskannya", segs7b
-del os.environ["TIPROUTER_API_KEY"]
-print("TRANSLATE POLISH CACHE OK")
+# --- frame identik dilewati: sig sama untuk ROI yang sama ---
+import numpy as _np2
+_a = _np2.zeros((64, 96, 3), dtype=_np2.uint8)
+assert lp._frame_sig(_a) == lp._frame_sig(_a.copy())
+assert lp._frame_sig(_a) != lp._frame_sig(_a + 1)
+print("LOCAL FRAME SIG OK")
 
 # --- metode cepat 2026-11-27: FPS 0.5, Whisper small + beam 1, paralel ---
 assert lp.FPS == 0.5, lp.FPS
@@ -273,6 +259,7 @@ if _ilu2.find_spec("yaml") is not None:
     lp.apply_profile("pc")
     assert lp.PROFILE == "pc" and lp.FPS == 0.5 and lp.WHISPER_MODEL == "small"
     assert lp.OCR_ENGINE == "rapidocr1-cpu"
+    assert lp.CRF == 26, lp.CRF
     assert lp.fingerprint()["profile"] == "pc"
     assert lp.fingerprint()["ocr"] == "rapidocr1-cpu"
     try:

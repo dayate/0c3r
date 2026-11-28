@@ -36,6 +36,7 @@ defaults:
   blur_radius: 20
   blur_time_pad: 0.4
   always_blur: true
+  crf: 23                 # 23 = kualitas lama; 26 = ~28% lebih kecil (diukur lokal)
 
 profiles:
   colab:
@@ -77,6 +78,11 @@ profiles:
     upscale: 2
     whisper_model: small
     whisper_beam: 1
+    # dynamic = 1 overlay ffmpeg per baris subtitle. Terukur 2026-11-28:
+    # 37 baris = >1 jam di i5-3550, 1 box static = ~1,1 dtk per 10 dtk video.
+    blur_mode: static
+    # 26 = ~16,6 MB per episode 158 dtk (CRF 23 = 23 MB, 28 = 13,4 MB).
+    crf: 26
 
   vm:
     platform: local
