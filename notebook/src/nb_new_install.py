@@ -9,7 +9,7 @@
 # - nvidia-cublas-cu12 TETAP ada: Whisper (faster-whisper/CTranslate2) butuh
 #   libcublas.so.12. nvidia-cudnn-cu12 DIGANTI cu13: CTranslate2 tidak
 #   link cuDNN (dicek via ldd), jadi tidak ada yang butuh cudnn-cu12.
-!pip install -q rapidocr "onnxruntime-gpu>=1.27" nvidia-cudnn-cu13 deep-translator faster-whisper ipywidgets matplotlib nvidia-cublas-cu12
+!pip install -q rapidocr "onnxruntime-gpu>=1.27" nvidia-cudnn-cu13 faster-whisper ipywidgets matplotlib nvidia-cublas-cu12
 !apt-get -qq update && apt-get -qq install -y fonts-noto-core fonts-dejavu-core
 !ffmpeg -version | head -1
 !nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true

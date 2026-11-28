@@ -111,6 +111,44 @@ assert _fused[0]["start"] == 0.2 and _fused[0]["end"] == 1.8, _fused
 assert _stats["whisper_only"] == 1 and len(_fused) == 2, (_stats, _fused)
 print("CELL WHISPER FUSE OK")
 
+# Re-scan target: segmen Whisper-only di-OCR ulang dengan sampling rapat.
+# Stub engine OCR (tanpa RapidOCR): frame ke-2 menemukan teks, sisanya kosong.
+assert callable(g["rescan_misses"]), "fungsi re-scan tidak terdefinisi"
+_orig_engine = g.get("get_engine")
+_orig_crop = g.get("load_crop")
+_orig_batch = g.get("ocr_batch")
+_orig_merge = g.get("_merge_boxes")
+_old_up = g["UPSCALE"]
+g["get_engine"] = lambda: object()
+g["load_crop"] = lambda p: (None, 640, 360, 600, 300, True)
+_calls = {"n": 0}
+def _fake_batch(engine, frames):
+    _calls["n"] += 1
+    return [("我要睡了", [0.4, 0.66, 0.6, 0.72])] if _calls["n"] == 2 else [("", None)]
+g["ocr_batch"] = _fake_batch
+g["_merge_boxes"] = lambda boxes: boxes[0]
+_fused2 = [
+    {"start": 0.0, "end": 0.5, "text_zh": "你好", "bbox": [0.2, 0.66, 0.8, 0.72],
+     "source": "ocr", "conflict": False, "timing_unverified": False},
+    {"start": 1.0, "end": 1.6, "text_zh": "睡了", "bbox": None,
+     "source": "asr", "conflict": False, "timing_unverified": False},
+    {"start": 2.0, "end": 2.6, "text_zh": "干杯", "bbox": None,
+     "source": "asr", "conflict": False, "timing_unverified": False},
+    {"start": 2.8, "end": 2.9, "text_zh": "啊", "bbox": None,
+     "source": "asr", "conflict": False, "timing_unverified": False},
+]
+_out, _rstats = g["rescan_misses"](vid, _fused2)
+g["get_engine"], g["load_crop"], g["ocr_batch"], g["_merge_boxes"] = (
+    _orig_engine, _orig_crop, _orig_batch, _orig_merge)
+assert _rstats == {"rescanned": 2, "recovered": 1, "still_missing": 2}, _rstats
+_rec = [s for s in _out if s["start"] == 1.0][0]
+assert _rec["text_zh"] == "我要睡了" and _rec["source"] == "ocr-rescan", _rec
+assert _rec["bbox"] == [0.4, 0.66, 0.6, 0.72], _rec
+_miss = [s for s in _out if s["start"] == 2.0][0]
+assert _miss["source"] == "asr" and _miss["text_zh"] == "干杯", _miss
+assert g["UPSCALE"] == _old_up, g["UPSCALE"]  # upscale dikembalikan setelah re-scan
+print("CELL WHISPER RESCAN OK")
+
 # _load_wav_array: WAV 16k mono -> float32, tanpa lewat PyAV decode_audio
 # (faster-whisper 1.2.1 + PyAV 19 crash di av.open metadata_errors)
 import wave as _wave, struct as _struct
@@ -254,10 +292,118 @@ exec(compile(open(os.path.join(SRC, "nb_new_translate.py"), encoding="utf-8").re
 assert g["validate_segments"](json.load(open(ep_json, encoding="utf-8"))["segments"]) == []
 print("CELL TRANSLATE RENORMALIZE OK")
 
+# Rantai baru (2026-11-28): CipRouter step dulu, gagal -> auto. Stub
+# ciprouter_translate di namespace g, lalu panggil translate_segments langsung.
+_real_ciprouter = g["ciprouter_translate"]
+g["_cache"] = {}
+g["_cache_prov"] = {}
+_calls_c = {"step": [], "auto": []}
+def _fake_ciprouter(lines, model):
+    _calls_c["step" if model == "step-3.7-flash" else "auto"].append(list(lines))
+    if model == "step-3.7-flash":
+        return ["Halo" if x == "你好" else "Sampai jumpa" for x in lines]
+    return None
+g["ciprouter_translate"] = _fake_ciprouter
+_segs_c = [{"start": 0.5, "end": 1.5, "text_zh": "你好"},
+           {"start": 2.0, "end": 2.8, "text_zh": "再见"}]
+_segs_c, _failed_c = g["translate_segments"](_segs_c)
+assert _failed_c == [], _failed_c
+assert [_s["text_id"] for _s in _segs_c] == ["Halo", "Sampai jumpa"], _segs_c
+assert g["_cache_prov"].get("你好") == "step", g["_cache_prov"]
+assert _calls_c["step"] == [["你好", "再见"]], _calls_c
+assert _calls_c["auto"] == [], _calls_c
+# step gagal -> auto dipanggil (batch), per-line retry tidak jalan kalau
+# batch auto sudah berhasil.
+g["_cache"] = {}
+g["_cache_prov"] = {}
+_calls_c["step"] = []
+_calls_c["auto"] = []
+def _fake_ciprouter_fail_step(lines, model):
+    _calls_c["step" if model == "step-3.7-flash" else "auto"].append(list(lines))
+    if model == "step-3.7-flash":
+        return None
+    return ["Halo" if x == "你好" else "Sampai jumpa" for x in lines]
+g["ciprouter_translate"] = _fake_ciprouter_fail_step
+_segs_c2, _failed_c2 = g["translate_segments"]([{"start": 0.5, "end": 1.5, "text_zh": "你好"}])
+assert _failed_c2 == [] and _segs_c2[0]["text_id"] == "Halo"
+assert g["_cache_prov"].get("你好") == "auto", g["_cache_prov"]
+assert _calls_c["step"] == [["你好"]], _calls_c
+assert _calls_c["auto"] == [["你好"]], _calls_c
+# Dua-duanya gagal -> baris masuk daftar gagal, text_id kosong.
+g["_cache"] = {}
+g["_cache_prov"] = {}
+g["ciprouter_translate"] = lambda lines, model: None
+_segs_c3, _failed_c3 = g["translate_segments"]([{"start": 0.5, "end": 1.5, "text_zh": "你好"}])
+assert len(_failed_c3) == 1 and _failed_c3[0]["text_zh"] == "你好", _failed_c3
+assert _segs_c3[0]["text_id"] == "", _segs_c3
+# Jumlah baris tidak cocok dari step -> dianggap gagal, auto dipanggil.
+g["_cache"] = {}
+g["_cache_prov"] = {}
+_calls_c["step"] = []
+_calls_c["auto"] = []
+def _fake_ciprouter_mismatch(lines, model):
+    _calls_c["step" if model == "step-3.7-flash" else "auto"].append(list(lines))
+    if model == "step-3.7-flash":
+        return ["Halo"]  # 1 baris untuk 2 baris masuk -> tidak cocok
+    return ["Halo" if x == "你好" else "Sampai jumpa" for x in lines]
+g["ciprouter_translate"] = _fake_ciprouter_mismatch
+_segs_c4, _failed_c4 = g["translate_segments"]([{"start": 0.5, "end": 1.5, "text_zh": "你好"},
+                                                {"start": 2.0, "end": 2.8, "text_zh": "再见"}])
+assert _failed_c4 == [], _failed_c4
+assert [_s["text_id"] for _s in _segs_c4] == ["Halo", "Sampai jumpa"], _segs_c4
+assert g["_cache_prov"].get("你好") == "auto", g["_cache_prov"]
+assert _calls_c["auto"] == [["你好", "再见"]], _calls_c
+print("CELL TRANSLATE CIPROUTER OK")
+
+# Override nama: teks ZH yang dikirim ke CipRouter sudah diganti
+# (韩沐宸 -> Han Muchen) sebelum request — cek payload-nya langsung
+# dengan stub urlopen + key env palsu.
+import urllib.request as _urlreq
+_seen_req = {}
+class _FakeResp:
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def read(self):
+        return json.dumps({"choices": [{"message": {"content": "1. Halo Han Muchen"}}]}).encode("utf-8")
+def _fake_urlopen(req, timeout=None):
+    _seen_req["data"] = req.data.decode("utf-8")
+    return _FakeResp()
+_real_urlopen = _urlreq.urlopen
+_real_key = os.environ.get("TIPROUTER_API_KEY")
+os.environ["TIPROUTER_API_KEY"] = "test-key"
+try:
+    _urlreq.urlopen = _fake_urlopen
+    _out_ovr = _real_ciprouter(["韩沐宸你好"], "step-3.7-flash")
+finally:
+    _urlreq.urlopen = _real_urlopen
+    if _real_key is None:
+        del os.environ["TIPROUTER_API_KEY"]
+    else:
+        os.environ["TIPROUTER_API_KEY"] = _real_key
+assert _out_ovr == ["Halo Han Muchen"], _out_ovr
+assert "Han Muchen" in _seen_req["data"] and "韩沐宸" not in _seen_req["data"], _seen_req["data"]
+assert g["apply_name_overrides"]("温薏和闺蜜") == "Wen Yi和sahabat"
+print("CELL TRANSLATE NAME OVERRIDE OK")
+
 exec(compile(open(os.path.join(SRC, "nb_new_render.py"), encoding="utf-8").read(), "rd", "exec"), g)
 hard = os.path.join(out, "episodes_hardsub_id", stem + "_id_hardsub.mp4")
 assert os.path.getsize(hard) > 0, "hardsub tidak dibuat"
 print("CELL RENDER OK", os.path.getsize(hard), "bytes")
+
+# Output 720p: video 1920x1080 -> 1280x720 (mode default profil pc = static,
+# jadi jalur filter_complex + scale ikut teruji).
+_big = os.path.join(eps, "big.mp4")
+subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=1920x1080:rate=24",
+                "-t", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p", _big], check=True)
+assert g["output_size"](1920, 1080) == (1280, 720)
+assert g["output_size"](1080, 1920) == (720, 1280)
+assert g["output_size"](640, 360) is None
+_segs_big = [{"start": 0.5, "end": 1.5, "text_zh": "你好", "text_id": "Halo", "bbox": [0.2, 0.66, 0.8, 0.72]},
+             {"start": 2.0, "end": 3.0, "text_zh": "再见", "text_id": "Sampai jumpa", "bbox": [0.25, 0.67, 0.75, 0.73]}]
+_hard_big = os.path.join(out, "episodes_hardsub_id", "big_id_hardsub.mp4")
+g["render_hardsub"](_big, _hard_big, _segs_big, 1920, 1080)
+assert g["probe"](_hard_big)[1:] == (1280, 720), g["probe"](_hard_big)
+print("CELL OUTPUT 720P OK")
 
 # Kartu nama/peran dibuang di cell Translate (definisi unconditional)
 _card = {"start": 119.0, "end": 121.0, "text_zh": "丰宸集团总裁", "bbox": [0.05, 0.50, 0.12, 0.65]}
@@ -274,6 +420,20 @@ _fc, _ = g["build_blur"](_bsegs, _band, 640, 360, "dynamic")
 assert "luma_radius=14" in _fc and "luma_power=3" in _fc, _fc
 assert "between(t,0.100,1.900)" in _fc, _fc
 print("CELL BLUR DYNAMIC OK")
+
+# Blur none (V0, default sejak 2026-11-28): build_blur mengembalikan (None, None)
+assert g["build_blur"](_bsegs, _band, 640, 360, "none") == (None, None)
+# Default config (tanpa override profil) = none; profil pc sengaja tetap static.
+_cfg_none = open(os.path.join(SRC, "nb_new_config.py"), encoding="utf-8").read()
+_cfg_none = _cfg_none.replace('EPISODES_DIR = "/content/drive/MyDrive/duanju/episodes"',
+                             f'EPISODES_DIR = r"{eps}"')
+_cfg_none = _cfg_none.replace('BASE_OUT_DIR = "/content/drive/MyDrive/duanju/suba_hardsub"',
+                             f'BASE_OUT_DIR = r"{out}"')
+_gnone = {"__name__": "__main__"}
+exec(compile(_cfg_none, "config-none", "exec"), _gnone)
+assert _gnone["BLUR_MODE"] == "none", _gnone["BLUR_MODE"]
+assert g["BLUR_MODE"] == "static", g["BLUR_MODE"]  # override profil pc
+print("CELL BLUR NONE OK")
 
 
 # Metode cepat 2026-11-27: Whisper "small" + beam 1 (dari cell config),
@@ -330,7 +490,8 @@ for _prof, _out in (("colab", "colab-suba-hardsub-v2.ipynb"),
     if _prof == "kaggle":
         assert _g2["EPISODES_DIR"].startswith("/kaggle/input/"), _g2["EPISODES_DIR"]
         assert _g2["BASE_OUT_DIR"].startswith("/kaggle/working/"), _g2["BASE_OUT_DIR"]
-        assert _g2["FPS"] == 1.0 and _g2["WHISPER_MODEL"] == "large-v3-turbo"
+        assert _g2["FPS"] == 0.5 and _g2["WHISPER_MODEL"] == "small"
+        assert _g2["WHISPER_BEAM"] == 1
     else:
         assert _g2["EPISODES_DIR"].startswith("/content/drive/"), _g2["EPISODES_DIR"]
     # OCR GPU (2026-11-27): profil notebook pakai RapidOCR 3.x.
@@ -340,6 +501,14 @@ for _prof, _out in (("colab", "colab-suba-hardsub-v2.ipynb"),
     _install_src = next(s for s in _srcs if "pip install" in s)
     assert "rapidocr" in _install_src and "rapidocr-onnxruntime" not in _install_src, _install_src
     assert "onnxruntime-gpu" in _install_src, _install_src
+    # CipRouter (2026-11-28): NLLB dihapus total — transformers +
+    # sentencepiece tidak boleh ada di install cell; config harus
+    # menyebut model primer step-3.7-flash.
+    assert "transformers" not in _install_src and "sentencepiece" not in _install_src, _install_src
+    assert "step-3.7-flash" in _cfg_src, _cfg_src
+    # NVENC preset p5 (2026-11-28), bukan p6.
+    assert any('"-preset", "p5"' in s for s in _srcs), "preset NVENC harus p5"
+    assert not any('"p6"' in s for s in _srcs), "preset p6 tidak boleh tersisa"
     if _prof == "colab":
         assert "nvidia-cudnn-cu13" in _install_src and "nvidia-cublas-cu12" in _install_src
         # cudnn-cu12 tidak boleh ada di BARIS pip (komentar boleh menyebutnya

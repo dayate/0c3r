@@ -229,8 +229,12 @@ def _rect(b, vw, vh):
 
 def build_blur(segs, band, vw, vh, mode):
     """Return (filter_complex_prefix, label_output).
+    none: tanpa blur sama sekali (V0, default) — subtitle ID dibakar apa adanya.
     static: satu rect fixed; ALWAYS_BLUR=True -> overlay selalu nyala (OCR miss aman),
     False -> hanya pada window tiap segmen. dynamic: rect per segmen (paling presisi)."""
+    if mode == "none":
+        return None, None
+
     def blur(h):
         r = max(2, min(BLUR_RADIUS, h // 2 - 1))
         return (f"boxblur=luma_radius={r}:luma_power=3:"
@@ -315,8 +319,25 @@ def write_ass(segs, path, vw, vh, font_size, margin_v):
 
 
 # ========================= tahap 3: Blur + Burn =========================
+def output_size(vw, vh):
+    """Ukuran output render: 720p (sisi panjang 1280, proporsional, genap)
+    kalau OUTPUT_720P dan input lebih besar; kalau tidak, None (= ukuran input).
+    Subtitle dibakar di resolusi input dulu, baru di-scale — proporsi teks tetap."""
+    if not OUTPUT_720P:
+        return None
+    m = max(vw, vh)
+    if m <= 1280:
+        return None
+    f = 1280.0 / m
+    return (max(2, int(round(vw * f / 2.0)) * 2),
+            max(2, int(round(vh * f / 2.0)) * 2))
+
+
 def render_hardsub(vid_path, out_mp4, segs, vw, vh, mode=None):
     mode = mode or BLUR_MODE
+    out_size = output_size(vw, vh)
+    print("  [render] ukuran output "
+          + (f"{out_size[0]}x{out_size[1]}" if out_size else "asli"), flush=True)
     use_nvenc = has_nvenc()
     dur = probe(vid_path)[0]
     band = compute_band(segs, vh)
@@ -337,23 +358,33 @@ def render_hardsub(vid_path, out_mp4, segs, vw, vh, mode=None):
     print(f"  [sub] {nsub} baris font={font_size} margin_v={margin_v}", flush=True)
     sub = f"ass=filename='{_sub_path(ass_path)}'"
 
-    blur_prefix, bg_label = build_blur(segs, band, vw, vh, mode) if band else (None, None)
-    if blur_prefix and bg_label:
-        fc = f"{blur_prefix};{bg_label}{sub}[v]"
-        cmd = ["ffmpeg", "-y", "-v", "error", "-i", vid_path, "-filter_complex", fc,
-               "-map", "[v]", "-map", "0:a?", "-c:a", "copy"]
-    elif band:
-        print("  [blur] build_blur gagal, fallback tanpa blur", flush=True)
-        cmd = ["ffmpeg", "-y", "-v", "error", "-i", vid_path, "-vf", sub, "-map", "0:v:0",
-               "-map", "0:a?", "-c:a", "copy"]
+    if mode == "none":
+        print("  [blur] mode=none, tanpa blur (V0)", flush=True)
+        blur_prefix, bg_label = None, None
     else:
-        print("  [blur] tidak ada bbox teks, blur dilewati", flush=True)
-        cmd = ["ffmpeg", "-y", "-v", "error", "-i", vid_path, "-vf", sub, "-map", "0:v:0",
+        blur_prefix, bg_label = build_blur(segs, band, vw, vh, mode) if band else (None, None)
+    if blur_prefix and bg_label:
+        if out_size:
+            fc = f"{blur_prefix};{bg_label}{sub}[v];[v]scale={out_size[0]}:{out_size[1]}[vout]"
+            vmap = "[vout]"
+        else:
+            fc = f"{blur_prefix};{bg_label}{sub}[v]"
+            vmap = "[v]"
+        cmd = ["ffmpeg", "-y", "-v", "error", "-i", vid_path, "-filter_complex", fc,
+               "-map", vmap, "-map", "0:a?", "-c:a", "copy"]
+    else:
+        if mode != "none":
+            if band:
+                print("  [blur] build_blur gagal, fallback tanpa blur", flush=True)
+            else:
+                print("  [blur] tidak ada bbox teks, blur dilewati", flush=True)
+        vf = f"{sub},scale={out_size[0]}:{out_size[1]}" if out_size else sub
+        cmd = ["ffmpeg", "-y", "-v", "error", "-i", vid_path, "-vf", vf, "-map", "0:v:0",
                "-map", "0:a?", "-c:a", "copy"]
 
     variants = []
     if use_nvenc:
-        variants.append(["-c:v", "h264_nvenc", "-preset", "p6", "-cq", "24"])
+        variants.append(["-c:v", "h264_nvenc", "-preset", "p5", "-cq", "24"])
     variants.append(["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"])
 
     for enc in variants:

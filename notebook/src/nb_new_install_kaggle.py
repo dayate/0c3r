@@ -4,7 +4,7 @@
 # (Colab saat ini CUDA 13.0; Kaggle kemungkinan masih CUDA 12.)
 # JALUR KAGGLE INI BELUM PERNAH DITES END-TO-END — kalau cell OCR gagal
 # di assert CUDA, kirim log-nya sebelum mengubah apa pun.
-!pip install -q rapidocr deep-translator faster-whisper ipywidgets matplotlib
+!pip install -q rapidocr faster-whisper ipywidgets matplotlib
 import glob
 _cuda_dirs = sorted(glob.glob('/usr/local/cuda-*/'))
 _cuda13 = any('cuda-13' in d for d in _cuda_dirs)

@@ -7,14 +7,14 @@ File ini adalah cermin untuk testing lokal, bukan sumber kebenaran.
 Alur per episode: probe -> decode frame langsung dari ffmpeg (rawvideo, tanpa PNG)
 -> OCR (ROI, gated, frame identik dilewati) + Whisper timing (model kecil,
 paralel dengan OCR) -> fusi OCR+Whisper -> dedupe jadi segmen -> translate
-gratis saja (DeepL -> Google -> MyMemory, tanpa LLM) -> SRT zh/id
+(gratis dulu: DeepL -> Google -> MyMemory, sisa gagal LLM TipRouter) -> SRT zh/id
 -> render hardsub (blur band subtitle + burn sub ID, satu pass).
 
 Metode cepat (2026-11-28): frame dibaca sebagai rawvideo dari pipe, jadi tidak
 ada PNG sementara di disk; frame yang ROI-nya identik dengan frame sebelumnya
-tidak di-OCR ulang. Translate lokal gratis saja — baris yang gagal di semua
-translator gratis membuat episode berhenti + review.json (SRT ID tetap tidak
-boleh berisi baris Mandarin). Render SENGAJA tidak diubah (libx264 veryfast
+tidak di-OCR ulang. Translate lokal: gratis dulu, sisa gagal dilempar ke
+LLM TipRouter — baris yang gagal di semua jalur membuat episode berhenti +
+review.json (SRT ID tetap tidak boleh berisi baris Mandarin). Render SENGAJA tidak diubah (libx264 veryfast
 CRF 23) supaya video output sama persis dengan versi sebelumnya.
 
 Whisper HANYA untuk timing, jadi model kecil ("small", beam 1/greedy) cukup —
@@ -27,6 +27,7 @@ Kerja  : ./work/frames|chunks|cache   Log: ./log.txt
 
 Env:
   DEEPL_API_KEY      (opsional; tanpa ini langsung Google -> MyMemory)
+  TIPROUTER_API_KEY  (opsional; tanpa ini baris gagal langsung masuk review.json)
 
 Contoh:  .venv\\Scripts\\python.exe local_pipeline.py --limit 1
          .venv\\Scripts\\python.exe local_pipeline.py --profile vm --limit 1
@@ -45,6 +46,8 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 import wave
 from concurrent.futures import ThreadPoolExecutor
 
@@ -124,7 +127,7 @@ def apply_profile(name):
     MIN_DUR = float(CFG.get("MIN_DUR") or p.get("min_dur") or 0.35)
     WHISPER_MODEL = CFG.get("WHISPER_MODEL") or p.get("whisper_model") or "small"
     WHISPER_BEAM = int(CFG.get("WHISPER_BEAM") or p.get("whisper_beam") or 1)
-    BLUR_MODE = CFG.get("BLUR_MODE") or p.get("blur_mode") or "dynamic"
+    BLUR_MODE = CFG.get("BLUR_MODE") or p.get("blur_mode") or "none"
     BLUR_RADIUS = int(CFG.get("BLUR_RADIUS") or p.get("blur_radius") or 20)
                         # 12 terlalu lemah: glyph putih di latar gelap masih
                         # kelihatan sebagai bercak; 20 + power 3 menghilangkannya
@@ -149,11 +152,12 @@ BATCH_SIZE = 8
 MIN_DUR = 0.35
 WHISPER_MODEL = CFG.get("WHISPER_MODEL") or "small"
 WHISPER_BEAM = int(CFG.get("WHISPER_BEAM") or 1)  # 1 = greedy, tercepat
-BLUR_MODE = "dynamic"
+BLUR_MODE = "none"
 BLUR_RADIUS = 20
 BLUR_TIME_PAD = 0.4
 CRF = int(CFG.get("CRF") or 23)
 ALWAYS_BLUR = True
+OUTPUT_720P = True        # output 720p (sisi panjang 1280), keputusan 2026-11-28
 DYNAMIC_MAX_BOX = 8     # di atas ini dynamic terlalu lambat (1 overlay per baris)
 try:
     apply_profile(PROFILE)
@@ -162,6 +166,13 @@ except Exception:
 
 WHISPER_LANG = "zh"
 WHISPER_MAX_SHIFT = 1.5  # detik, batas geser timing OCR ke timing Whisper
+
+# Re-scan (baris hilang): segmen Whisper-only di-OCR ulang dengan sampling
+# rapat + upscale lebih besar. Kasus nyata: 睡了 (~5,5 dtk) dan 干杯 (55 dtk).
+RESCAN_STEP = 0.25      # langkah sampling re-scan (detik)
+RESCAN_PAD = 0.2        # perluasan interval re-scan di kedua ujung
+RESCAN_UPSCALE = 4      # upscale re-scan (lebih besar dari UPSCALE=3)
+RESCAN_MIN_DUR = 0.2    # segmen Whisper-only lebih pendek dari ini tidak di-rescan
 
 # Gate murah: subtitle drama putih terang. ROI tanpa pixel putih = tidak ada teks.
 # shortcut: subtitle berwarna/gelap bisa lolos gate ini (false negative) -> set False.
@@ -177,6 +188,19 @@ PROGRESS_PCT = 10       # print progress ffmpeg tiap N persen
 FONT_NAME = "Arial"
 
 FREE_DELAY = 0.5        # jeda antar request translator gratis
+
+# LLM fallback (TipRouter, keputusan 2026-11-28 D4): baris yang gagal di
+# semua translator gratis dilempar ke LLM batch, lalu per baris.
+# Model step-3.7-flash dulu, gagal -> auto (sama seperti rantai notebook,
+# tapi lewat gateway tiprouter.my.id, bukan api.ciprouter.com langsung).
+LLM_URL = "https://tiprouter.my.id/v1/chat/completions"
+LLM_MODELS = ["step-3.7-flash", "auto"]
+LLM_BATCH = 20          # segmen per request
+LLM_TIMEOUT = 180
+# Nama/istilah yang diganti di teks ZH SEBELUM dikirim ke LLM
+# (bukan ke teks ZH yang disimpan): model sering salah menerjemah nama
+# orang dan 闺蜜 — kasus nyata 瘟疫 diterjemah jadi "Wabah".
+NAME_OVERRIDES = {"温薏": "Wen Yi", "韩沐宸": "Han Muchen", "闺蜜": "sahabat"}
 
 MAX_OUTPUT_MB = 0       # 0 = nonaktif; >0 = peringatan keras di log kalau output lebih besar
 
@@ -687,6 +711,10 @@ def _whisper_fingerprint():
         "beam_size": WHISPER_BEAM,
         "word_timestamps": True,
         "chunk_seconds": CHUNK_SECONDS,
+        "rescan_step": RESCAN_STEP,
+        "rescan_pad": RESCAN_PAD,
+        "rescan_upscale": RESCAN_UPSCALE,
+        "rescan_min_dur": RESCAN_MIN_DUR,
     }
 
 
@@ -896,6 +924,70 @@ def fuse_segments(ocr_segs, whisper_segs):
     return fused, stats
 
 
+def rescan_misses(vid_path, fused):
+    """Re-scan target: segmen Whisper-only (suara ada, OCR tidak menemukan
+    teks) di-OCR ulang dengan sampling rapat di sekitar intervalnya.
+    Return (fused_baru, stats). Segmen yang pulih jadi source="ocr-rescan"
+    (teks dari OCR, timing tetap dari Whisper); yang tidak pulih tetap
+    source="asr" seperti sebelumnya — tidak ada yang hilang.
+    Kasus nyata (ep 1): 睡了 (2 karakter kecil, ~5,5 dtk) dan 干杯
+    (transisi 55 dtk) lolos dari sampling 0,5 fps; upscale 3 di frame
+    5,5 dtk tidak menemukan apa-apa, jadi re-scan pakai sampling rapat
+    0,25 dtk + upscale lebih besar (RESCAN_UPSCALE)."""
+    stats = {"rescanned": 0, "recovered": 0, "still_missing": 0}
+    engine = get_engine()
+    tmpd = os.path.join(WORK_DIR, "rescan")
+    os.makedirs(tmpd, exist_ok=True)
+    out = []
+    for s in fused:
+        if s.get("source") != "asr":
+            out.append(s)
+            continue
+        dur_s = float(s["end"]) - float(s["start"])
+        if dur_s < RESCAN_MIN_DUR:
+            out.append(s)
+            stats["still_missing"] += 1
+            continue
+        stats["rescanned"] += 1
+        t0 = max(0.0, float(s["start"]) - RESCAN_PAD)
+        t1 = float(s["end"]) + RESCAN_PAD
+        times, t = [], t0
+        while t <= t1 + 1e-9:
+            times.append(round(t, 3))
+            t += RESCAN_STEP
+        found = {}  # teks -> [bbox...]
+        global UPSCALE
+        _old_up = UPSCALE
+        try:
+            UPSCALE = RESCAN_UPSCALE
+            for t in times:
+                fp = os.path.join(tmpd, "r.png")
+                r = subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", f"{t:.3f}",
+                                    "-i", vid_path, "-frames:v", "1", fp],
+                                   capture_output=True)
+                if r.returncode != 0 or not os.path.exists(fp):
+                    continue
+                arr, _w, _h, cw, ch, gate = load_crop(fp)
+                if not gate:
+                    continue
+                txt, box = ocr_batch(engine, [(arr, cw, ch)])[0]
+                if txt and box:
+                    found.setdefault(txt, []).append(box)
+        finally:
+            UPSCALE = _old_up
+        if not found:
+            out.append(s)
+            stats["still_missing"] += 1
+            continue
+        best = max(found.items(), key=lambda kv: len(kv[1]))[0]
+        out.append({**s, "text_zh": best, "bbox": _merge_boxes(found[best]),
+                    "source": "ocr-rescan", "conflict": False})
+        stats["recovered"] += 1
+    shutil.rmtree(tmpd, ignore_errors=True)
+    out.sort(key=lambda s: (float(s["start"]), float(s["end"])))
+    return out, stats
+
+
 def whisper_episode(vid_path, dur):
     """Transkrip satu episode per chunk (checkpoint) -> (whisper_segs, detik)."""
     stem = os.path.splitext(os.path.basename(vid_path))[0]
@@ -1037,6 +1129,70 @@ def google_translate(text):
     return None, None
 
 
+def _strip_json(txt):
+    txt = txt.strip()
+    if txt.startswith("```"):
+        txt = re.sub(r"^```[a-zA-Z]*\n?", "", txt).rstrip("`").strip()
+    i, j = txt.find("["), txt.rfind("]")
+    return txt[i:j + 1] if i >= 0 and j > i else txt
+
+
+def apply_name_overrides(text):
+    """Ganti nama/istilah di teks ZH sebelum dikirim ke LLM.
+    Teks ZH yang disimpan (cache key + SRT ZH) TIDAK diubah — hanya salinan
+    yang dikirim ke API."""
+    for k, v in NAME_OVERRIDES.items():
+        if k in text:
+            text = text.replace(k, v)
+    return text
+
+
+def llm_translate(lines, system=None):
+    """Terjemah batch lewat LLM TipRouter. Return list 1:1 atau None."""
+    api_key = (os.environ.get("TIPROUTER_API_KEY") or "").strip()
+    if not api_key:
+        return None
+    lines = [apply_name_overrides(x) for x in lines]
+    system = system or ("Kamu penerjemah subtitle drama Mandarin ke bahasa Indonesia. "
+              "Terjemahkan tiap baris secara natural dan ringkas, jangan menambah penjelasan. "
+              "Balas HANYA JSON array of string, jumlah dan urutan sama dengan input.")
+    body = {"temperature": 0.2,
+            "messages": [{"role": "system", "content": system},
+                         {"role": "user", "content": json.dumps(lines, ensure_ascii=False)}]}
+    for model in LLM_MODELS:
+        for attempt in range(2):
+            payload = dict(body, model=model)
+            req = urllib.request.Request(
+                LLM_URL, data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json",
+                         "Authorization": "Bearer " + api_key})
+            try:
+                with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as r:
+                    resp = json.loads(r.read().decode("utf-8"))
+                out = json.loads(_strip_json(resp["choices"][0]["message"]["content"]))
+                if isinstance(out, list) and len(out) == len(lines):
+                    return [str(x).strip() for x in out]
+                log.warning("LLM %s: jumlah baris tidak cocok", model)
+            except urllib.error.HTTPError as e:
+                log.warning("LLM %s HTTP %s", model, e.code)
+                if e.code in (429, 500, 502, 503):
+                    time.sleep(2.0 * (attempt + 1))
+                    continue
+                break
+            except Exception as e:
+                log.warning("LLM %s gagal: %s: %s", model, type(e).__name__, str(e)[:120])
+                time.sleep(1.0)
+    return None
+
+
+def llm_translate_single(text):
+    """Retry per baris lewat LLM. Return teks Indonesia atau None."""
+    out = llm_translate([text])
+    if out and out[0] and out[0] != text and not has_mandarin(out[0]):
+        return out[0]
+    return None
+
+
 def _clean_id(text):
     """Bersihkan hasil terjemah: buang tanda kutip yang membungkus seluruh
     baris dan spasi ganda. Makna tidak diubah."""
@@ -1074,11 +1230,12 @@ def drop_name_cards(segs):
 
 
 def translate_segments(segs):
-    """Translate gratis saja: DeepL -> Google -> MyMemory, tanpa LLM.
+    """DeepL -> Google -> MyMemory dulu, sisa gagal baru LLM TipRouter
+    (batch), lalu LLM per baris. Return (segs, failed_list).
 
-    Return (segs, failed_list). Jaminan tetap: tidak ada baris Mandarin di
-    text_id. Baris yang gagal di semua translator gratis masuk failed_list;
-    process_episode menulis review.json lalu menghentikan episode.
+    Jaminan: tidak ada baris yang dibiarkan Mandarin di text_id. Baris yang
+    gagal di semua jalur masuk failed_list; process_episode menulis
+    review.json lalu menghentikan episode.
     """
     todo = []
     n_passthrough = 0
@@ -1102,7 +1259,7 @@ def translate_segments(segs):
         print(f"  [tr] {n_passthrough} baris non-Mandarin diteruskan apa adanya", flush=True)
 
     uniq = list(dict.fromkeys(todo))
-    stats = {"deepl": 0, "google": 0, "mymemory": 0}
+    stats = {"deepl": 0, "google": 0, "mymemory": 0, "llm": 0}
     prov_of = {}
     failed = []
     for n, zh in enumerate(uniq, 1):
@@ -1126,8 +1283,34 @@ def translate_segments(segs):
     save_cache()
 
     if failed:
-        log.warning("[tr] %d baris gagal di semua translator gratis "
-                    "(tanpa LLM -> masuk review.json)", len(failed))
+        log.warning("[tr] %d baris -> LLM fallback", len(failed))
+        for i in range(0, len(failed), LLM_BATCH):
+            chunk = failed[i:i + LLM_BATCH]
+            out = llm_translate(chunk)
+            if out:
+                for zh, id_ in zip(chunk, out):
+                    if id_ and id_ != zh and not has_mandarin(id_):
+                        _cache[zh] = id_
+                        stats["llm"] += 1
+                        _cache_prov[zh] = "llm"
+            log.info("[tr] LLM %d/%d", min(i + LLM_BATCH, len(failed)), len(failed))
+            save_cache()
+
+    # Fallback terakhir: retry per baris lewat LLM. Baris yang lolos di sini
+    # masuk cache seperti biasa.
+    still_failed = [zh for zh in failed
+                    if zh not in _cache or has_mandarin(_cache.get(zh, zh))]
+    if still_failed:
+        log.warning("[tr] %d baris -> LLM per baris (retry terakhir)", len(still_failed))
+        for n, zh in enumerate(still_failed, 1):
+            out = llm_translate_single(zh)
+            if out:
+                _cache[zh] = out
+                _cache_prov[zh] = "llm"
+                stats["llm"] += 1
+            if n % 5 == 0:
+                save_cache()
+        save_cache()
 
     for s in segs:
         zh = (s.get("text_zh") or "").strip()
@@ -1141,8 +1324,8 @@ def translate_segments(segs):
                      "reason": "all_providers_failed"}
                     for s in segs
                     if (s.get("text_zh") or "").strip() and not s.get("text_id")]
-    log.info("[tr] DeepL=%d Google=%d MyMemory=%d gagal=%d | %d/%d segmen",
-             stats["deepl"], stats["google"], stats["mymemory"],
+    log.info("[tr] DeepL=%d Google=%d MyMemory=%d LLM=%d gagal=%d | %d/%d segmen",
+             stats["deepl"], stats["google"], stats["mymemory"], stats["llm"],
              len(failed_final), done, len(segs))
     return segs, failed_final
 
@@ -1228,8 +1411,12 @@ def _rect(b, vw, vh):
 
 def build_blur(segs, band, vw, vh, mode):
     """Return (filter_complex_prefix, label_output) atau (None, None).
+    none: tanpa blur sama sekali (V0, default) — subtitle ID dibakar apa adanya.
     static: satu rect fixed; ALWAYS_BLUR=True -> overlay selalu nyala (OCR miss aman),
     False -> hanya pada window tiap segmen. dynamic: rect per segmen (paling presisi)."""
+    if mode == "none":
+        return None, None
+
     def blur(h):
         # gblur: gumpalan halus, bukan kotak-kotak boxblur power 3 yang terlihat
         # seperti awan abu-abu. Sigma = radius/2 -> 10 untuk band 118px: teks
@@ -1309,9 +1496,26 @@ def _blur_mode_for(segs, mode):
     return mode
 
 
+def output_size(vw, vh):
+    """Ukuran output render: 720p (sisi panjang 1280, proporsional, genap)
+    kalau OUTPUT_720P dan input lebih besar; kalau tidak, None (= ukuran input).
+    Subtitle dibakar di resolusi input dulu, baru di-scale — proporsi teks tetap."""
+    if not OUTPUT_720P:
+        return None
+    m = max(vw, vh)
+    if m <= 1280:
+        return None
+    f = 1280.0 / m
+    return (max(2, int(round(vw * f / 2.0)) * 2),
+            max(2, int(round(vh * f / 2.0)) * 2))
+
+
 def render_hardsub(vid_path, srt_path, out_mp4, segs, vw, vh, blur_mode=None):
     # None = baca global saat dipanggil (default arg statis tidak ikut --blur)
     blur_mode = _blur_mode_for(segs, blur_mode or BLUR_MODE)
+    out_size = output_size(vw, vh)
+    log.info("[render] ukuran output %s",
+             f"{out_size[0]}x{out_size[1]}" if out_size else "asli")
     use_nvenc = has_nvenc()
     band = compute_band(segs, vh)
     log.info("[blur] band=%s mode=%s segmen=%d radius=%d always=%s",
@@ -1331,24 +1535,34 @@ def render_hardsub(vid_path, srt_path, out_mp4, segs, vw, vh, blur_mode=None):
              sum(1 for s in segs if (s.get("text_id") or "").strip()), font_size, margin_v)
     sub = f"ass=filename='{_sub_path(ass_path)}'"
 
-    blur_prefix, bg_label = build_blur(segs, band, vw, vh, blur_mode) if band else (None, None)
+    if blur_mode == "none":
+        log.info("[blur] mode=none, tanpa blur (V0)")
+        blur_prefix, bg_label = None, None
+    else:
+        blur_prefix, bg_label = build_blur(segs, band, vw, vh, blur_mode) if band else (None, None)
     if blur_prefix and bg_label:
         # blur_prefix berakhir dengan bg_label (output overlay); chain ass di atasnya
-        fc = f"{blur_prefix};{bg_label}{sub}[v]"
+        if out_size:
+            fc = f"{blur_prefix};{bg_label}{sub}[v];[v]scale={out_size[0]}:{out_size[1]}[vout]"
+            vmap = "[vout]"
+        else:
+            fc = f"{blur_prefix};{bg_label}{sub}[v]"
+            vmap = "[v]"
         cmd = ["ffmpeg", "-y", "-v", "error", "-i", vid_path, "-filter_complex", fc,
-               "-map", "[v]", "-map", "0:a?", "-c:a", "copy"]
-    elif band:
-        log.info("[blur] build_blur gagal, fallback ke tanpa blur")
-        cmd = ["ffmpeg", "-y", "-v", "error", "-i", vid_path, "-vf", sub, "-map", "0:v:0",
-               "-map", "0:a?", "-c:a", "copy"]
+               "-map", vmap, "-map", "0:a?", "-c:a", "copy"]
     else:
-        log.info("[blur] tidak ada bbox teks, blur dilewati")
-        cmd = ["ffmpeg", "-y", "-v", "error", "-i", vid_path, "-vf", sub, "-map", "0:v:0",
+        if blur_mode != "none":
+            if band:
+                log.info("[blur] build_blur gagal, fallback ke tanpa blur")
+            else:
+                log.info("[blur] tidak ada bbox teks, blur dilewati")
+        vf = f"{sub},scale={out_size[0]}:{out_size[1]}" if out_size else sub
+        cmd = ["ffmpeg", "-y", "-v", "error", "-i", vid_path, "-vf", vf, "-map", "0:v:0",
                "-map", "0:a?", "-c:a", "copy"]
 
     variants = []
     if use_nvenc:
-        variants.append(["-c:v", "h264_nvenc", "-preset", "p6", "-cq", "24"])
+        variants.append(["-c:v", "h264_nvenc", "-preset", "p5", "-cq", "24"])
     variants.append(["-c:v", "libx264", "-preset", "veryfast", "-crf", str(CRF)])
 
     dur = probe(vid_path)[0]
@@ -1431,6 +1645,11 @@ def process_episode(vid_path, render):
             log.info("[fusi] timing diperbaiki %d, whisper-only %d, konflik %d, ocr-only %d",
                      fstats["timing_fixed"], fstats["whisper_only"],
                      fstats["conflict"], fstats["ocr_only"])
+            segs, rstats = rescan_misses(vid_path, segs)
+            if rstats["rescanned"]:
+                log.info("[rescan] %d segmen Whisper-only di-OCR ulang, pulih %d, "
+                         "tetap hilang %d", rstats["rescanned"],
+                         rstats["recovered"], rstats["still_missing"])
             payload = payload or {}
             payload["whisper_applied"] = True
             payload["whisper_fingerprint"] = _whisper_fingerprint()
@@ -1531,7 +1750,7 @@ def main():
     ap.add_argument("--limit", type=int, default=0, help="proses maksimal N episode")
     ap.add_argument("--no-render", action="store_true", help="hanya OCR+translate+SRT")
     ap.add_argument("--no-merge", action="store_true", help="lewati merge akhir")
-    ap.add_argument("--blur", choices=("static", "dynamic"), default=BLUR_MODE,
+    ap.add_argument("--blur", choices=("static", "dynamic", "none"), default=BLUR_MODE,
                     help="static = 1 band time-gated (CPU); dynamic = box per segmen (GPU/Colab)")
     ap.add_argument("--profile", default=None,
                     help="profil per device dari profiles.yaml (pc, vm, instabox, colab, kaggle)")

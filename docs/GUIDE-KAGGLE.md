@@ -8,7 +8,7 @@ dan output semuanya privat — hanya akunmu yang bisa akses.
 - Akun Kaggle (gratis, tanpa kartu kredit)
 - File `kaggle-suba-hardsub-v2.ipynb` (24 cell, sudah disiapkan, profil `kaggle`)
 - 1 episode video untuk tes (mis. `第000001集.mp4`, ~5,7 MB)
-- (Opsional) `TIPROUTER_API_KEY` dan `DEEPL_API_KEY` untuk fallback LLM + polish terjemahan
+- `TIPROUTER_API_KEY` (wajib untuk translate CipRouter; tanpa ini semua baris masuk daftar review)
 
 ## 0. Sekali saja: verifikasi nomor HP
 
@@ -40,8 +40,8 @@ Tanpa ini, GPU dan Internet tidak bisa dinyalakan.
 - **Add Data → Your Datasets** → pilih `duanju-episodes`.
   Ini yang me-mount dataset ke `/kaggle/input/duanju-episodes`.
   Lakukan sebelum Run All; kalau sesi sudah jalan, restart session dulu.
-- **Add-ons → Secrets** → tambah `TIPROUTER_API_KEY` (dan `DEEPL_API_KEY`
-  kalau ada). Jangan pernah tempel key di dalam cell mana pun.
+- **Add-ons → Secrets** → tambah `TIPROUTER_API_KEY`.
+  Jangan pernah tempel key di dalam cell mana pun.
 
 ## 4. Sesuaikan config (cell 3 — Konfigurasi Utama)
 
@@ -103,8 +103,8 @@ mau 100% tidak keluar dari mesin sendiri, jalankan di PC lokal
 - `FileNotFoundError: /kaggle/input/duanju-episodes` → dataset belum
   di-attach (Add Data) atau slug beda → samakan `EPISODES_DIR`.
 - Whisper gagal download model → Internet belum On.
-- Translate gagal semua → cek Secrets terpasang; tanpa key pun translator
-  gratis tetap dicoba dulu (DeepL → Google → MyMemory → LLM).
+- Translate gagal semua → cek Secrets terpasang; tanpa key, semua baris
+  masuk daftar review (rantai CipRouter: step → auto).
 - Sesi mati di tengah → resume: checkpoint OCR/Whisper per chunk tersimpan
   di `/kaggle/working` (selama Persistence: Files only), jalankan ulang
   cell yang sama — fingerprint cocok = pakai checkpoint lama.

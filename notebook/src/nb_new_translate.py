@@ -165,104 +165,99 @@ if "assert_valid_segments" not in globals() or "normalize_segments" not in globa
         return True
 
 
-_deepl = None
-_google = None
-_mymemory = None
-
 # ========================= translate =========================
-def _strip_json(txt):
-    txt = txt.strip()
-    if txt.startswith("```"):
-        txt = re.sub(r"^```[a-zA-Z]*\n?", "", txt).rstrip("`").strip()
-    i, j = txt.find("["), txt.rfind("]")
-    return txt[i:j + 1] if i >= 0 and j > i else txt
+# Rantai (keputusan 2026-11-28): CipRouter API — step-3.7-flash dulu,
+# gagal -> auto, gagal -> daftar review. Google DIHAPUS (D1: 0/41 dan
+# 0/44 di Colab) dan NLLB DIHAPUS total (D3: kualitas drama jelek,
+# load 291 dtk). Key dari Colab Secrets TIPROUTER_API_KEY — tidak pernah
+# ditulis di notebook. Benchmark 44 baris: step 44/44 dalam 31,3 dtk,
+# 0 reasoning token; auto 44/44 dalam 74,1 dtk (5.958 reasoning token).
+_CIPROUTER_SYSTEM = (
+    "Kamu penerjemah subtitle drama Mandarin ke bahasa Indonesia. "
+    "Terjemahkan tiap baris ke bahasa Indonesia natural untuk subtitle, "
+    "jaga nama orang (韩沐宸=Han Muchen, 温薏=Wen Yi) dan 闺蜜=sahabat. "
+    "Jawab HANYA dengan daftar bernomor, satu terjemahan per baris, "
+    "tanpa penjelasan."
+)
+_CIPROUTER_KEY_WARNED = False  # True sesudah peringatan key hilang dicetak sekali
 
 
-def llm_translate(lines, system=None):
-    if not TIPROUTER_API_KEY:
+
+if "_get_secret" not in globals():
+    def _get_secret(name):
+        """Baca secret dari Colab Secrets (userdata), fallback env var.
+        Return None kalau tidak ada di keduanya."""
+        try:
+            from google.colab import userdata
+            v = userdata.get(name)
+            if v:
+                return v
+        except Exception:
+            pass
+        return os.environ.get(name) or None
+def apply_name_overrides(text):
+    """Ganti nama/istilah di teks ZH sebelum dikirim ke translator.
+    Teks ZH yang disimpan (cache key + SRT ZH) TIDAK diubah — hanya salinan
+    yang dikirim ke API. Return teks baru (atau teks asli kalau tidak ada
+    yang cocok)."""
+    for k, v in NAME_OVERRIDES.items():
+        if k in text:
+            text = text.replace(k, v)
+    return text
+
+
+def ciprouter_translate(lines, model):
+    """Terjemah satu batch baris Mandarin -> Indonesia via CipRouter API.
+    Return list 1:1 (urutan sama) atau None kalau gagal. Gagal di sini
+    TIDAK menggagalkan episode — pemanggil mencoba model fallback, lalu
+    menulis barisnya ke review."""
+    global _CIPROUTER_KEY_WARNED
+    key = _get_secret("TIPROUTER_API_KEY")
+    if not key:
+        if not _CIPROUTER_KEY_WARNED:
+            print("  [tr] CipRouter: TIPROUTER_API_KEY tidak ada di Colab Secrets", flush=True)
+            _CIPROUTER_KEY_WARNED = True
         return None
-    system = system or ("Kamu penerjemah subtitle drama Mandarin ke bahasa Indonesia. "
-              "Terjemahkan tiap baris secara natural dan ringkas, jangan menambah penjelasan. "
-              "Balas HANYA JSON array of string, jumlah dan urutan sama dengan input.")
-    body = {"temperature": 0.2,
-            "messages": [{"role": "system", "content": system},
-                         {"role": "user", "content": json.dumps(lines, ensure_ascii=False)}]}
-    for model in LLM_MODELS:
-        for attempt in range(2):
-            payload = dict(body, model=model)
-            req = urllib.request.Request(
-                LLM_URL, data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json",
-                         "Authorization": "Bearer " + TIPROUTER_API_KEY})
-            try:
-                with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as r:
-                    resp = json.loads(r.read().decode("utf-8"))
-                out = json.loads(_strip_json(resp["choices"][0]["message"]["content"]))
-                if isinstance(out, list) and len(out) == len(lines):
-                    return [str(x).strip() for x in out]
-                print(f"  [tr] LLM {model}: jumlah baris tidak cocok", flush=True)
-            except urllib.error.HTTPError as e:
-                print(f"  [tr] LLM {model} HTTP {e.code}", flush=True)
-                if e.code in (429, 500, 502, 503):
-                    time.sleep(2.0 * (attempt + 1))
-                    continue
-                break
-            except Exception as e:
-                print(f"  [tr] LLM {model} gagal: {type(e).__name__}: {str(e)[:120]}", flush=True)
-                time.sleep(1.0)
-    return None
-
-
-def deepl_translate(text):
-    global _deepl
-    if not DEEPL_API_KEY:
-        return None
+    lines = [apply_name_overrides(x) for x in lines]
+    import urllib.error
+    import urllib.request
+    user = "Terjemahkan baris-baris ini:\n" + "\n".join(
+        f"{n}. {s}" for n, s in enumerate(lines, 1))
+    payload = {"model": model,
+               "messages": [{"role": "system", "content": _CIPROUTER_SYSTEM},
+                            {"role": "user", "content": user}],
+               "temperature": 0}
+    req = urllib.request.Request(
+        CIPROUTER_URL, method="POST",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {key}"})
     try:
-        if _deepl is None:
-            from deep_translator import DeepLTranslator
-            _deepl = DeepLTranslator(api_key=DEEPL_API_KEY, source="zh", target="id")
-        return _deepl.translate(text) or None
+        with urllib.request.urlopen(req, timeout=CIPROUTER_TIMEOUT) as r:
+            resp = json.loads(r.read() or b"{}")
+        content = resp["choices"][0]["message"]["content"]
     except Exception as e:
-        print(f"  [tr] DeepL: {str(e)[:100]}", flush=True)
+        print(f"  [tr] CipRouter {model} gagal: {type(e).__name__}: {str(e)[:100]}", flush=True)
         return None
+    # Parse daftar bernomor jadi list 1:1. Nomor di depan dibuang; baris
+    # tanpa nomor tetap dihitung (model kadang menghilangkan nomor).
+    # Baris pengantar ("Here is the translation...") membuat jumlah tidak
+    # cocok -> return None -> fallback. Itu yang benar: jangan menebak.
+    out = []
+    for ln in content.strip().splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        m = re.match(r"^\d+[.)]\s*(.*)$", ln)
+        out.append(m.group(1).strip() if m else ln)
+    if len(out) != len(lines):
+        print(f"  [tr] CipRouter {model}: jumlah baris tidak cocok "
+              f"({len(out)} vs {len(lines)})", flush=True)
+        return None
+    return [str(x).strip() for x in out]
 
 
-def google_translate(text):
-    """Return (teks, provider) — provider 'google' atau 'mymemory'."""
-    global _google, _mymemory
-    try:
-        if _google is None:
-            from deep_translator import GoogleTranslator
-            _google = GoogleTranslator(source="zh-CN", target="id")
-        time.sleep(FREE_DELAY)
-        out = _google.translate(text)
-        if out and out.strip():
-            return out.strip(), "google"
-    except Exception:
-        pass
-    try:
-        if _mymemory is None:
-            from deep_translator import MyMemoryTranslator
-            _mymemory = MyMemoryTranslator(source="zh-CN", target="id-ID")
-        time.sleep(FREE_DELAY)
-        out = _mymemory.translate(text)
-        if out and out.strip():
-            return out.strip(), "mymemory"
-    except Exception as e:
-        print(f"  [tr] gratis gagal: {str(e)[:100]}", flush=True)
-    return None, None
 
-
-def llm_translate_single(text):
-    """Retry per baris lewat LLM, model kedua dulu, 2x percobaan per model.
-
-    Dipakai hanya untuk baris yang gagal di semua jalur sebelumnya.
-    Return teks Indonesia atau None.
-    """
-    out = llm_translate([text])
-    if out and out[0] and out[0] != text and not has_mandarin(out[0]):
-        return out[0]
-    return None
 
 
 def _clean_id(text):
@@ -275,20 +270,9 @@ def _clean_id(text):
     return " ".join(text.split())
 
 
-def llm_polish(lines):
-    """Polish terjemahan Indonesia supaya natural seperti dialog drama.
-    Dipakai hanya untuk baris dari MyMemory/Google. Return list atau None."""
-    system = ("Kamu editor subtitle drama. Perbaiki terjemahan Indonesia ini "
-              "supaya natural seperti dialog sehari-hari, jangan kaku, jangan "
-              "ubah makna, jangan tambah atau buang informasi, jangan tambah "
-              "tanda kutip. Balas HANYA JSON array of string, jumlah dan "
-              "urutan sama dengan input.")
-    return llm_translate(lines, system=system)
-
-
 def translate_segments(segs):
-    """Gratis dulu (DeepL -> Google -> MyMemory), sisa gagal baru LLM batch,
-    lalu LLM per baris. Return (segs, failed_list).
+    """step dulu (batch), gagal -> auto (batch), gagal -> auto per baris.
+    Return (segs, failed_list).
 
     Jaminan: tidak ada baris yang dibiarkan Mandarin di text_id.
     Baris yang masih gagal setelah semua fallback dikembalikan di failed_list
@@ -317,85 +301,58 @@ def translate_segments(segs):
         print(f"  [tr] {n_passthrough} baris non-Mandarin diteruskan apa adanya", flush=True)
 
     uniq = list(dict.fromkeys(todo))
-    stats = {"deepl": 0, "google": 0, "mymemory": 0, "llm": 0, "polish": 0}
-    prov_of = {}
-    failed = []
-    for n, zh in enumerate(uniq, 1):
-        out = deepl_translate(zh)
-        if out and out != zh:
-            _cache[zh] = out
-            stats["deepl"] += 1
-            prov_of[zh] = "deepl"
-            _cache_prov[zh] = "deepl"
-            continue
-        out, prov = google_translate(zh)
-        if out and out != zh:
-            _cache[zh] = out
-            stats[prov] += 1
-            prov_of[zh] = prov
-            _cache_prov[zh] = prov
-        else:
-            failed.append(zh)
-        if n % 10 == 0:
-            print(f"  [tr] gratis {n}/{len(uniq)} (gagal {len(failed)})", flush=True)
-    save_cache()
+    stats = {"step": 0, "auto": 0}
 
-    if failed:
-        print(f"  [tr] {len(failed)} baris -> LLM fallback", flush=True)
-        for i in range(0, len(failed), LLM_BATCH):
-            chunk = failed[i:i + LLM_BATCH]
-            out = llm_translate(chunk)
-            if out:
-                for zh, id_ in zip(chunk, out):
-                    if id_ and id_ != zh and not has_mandarin(id_):
-                        _cache[zh] = id_
-                        stats["llm"] += 1
-                        _cache_prov[zh] = "llm"
-            print(f"  [tr] LLM {min(i + LLM_BATCH, len(failed))}/{len(failed)}", flush=True)
+    def _batch_ok(chunk, out):
+        return isinstance(out, list) and len(out) == len(chunk)
+
+    def _simpan(chunk, out, prov):
+        """Simpan baris yang valid dari satu batch. Return jumlah disimpan."""
+        n = 0
+        for zh, id_ in zip(chunk, out):
+            if id_ and id_ != zh and not has_mandarin(id_):
+                _cache[zh] = id_
+                stats[prov] += 1
+                _cache_prov[zh] = prov
+                n += 1
+        return n
+
+    def _belum():
+        return [zh for zh in uniq
+                if zh not in _cache or has_mandarin(_cache.get(zh, zh))]
+
+    # Rung 1: step, batch CIPROUTER_BATCH.
+    for i in range(0, len(uniq), CIPROUTER_BATCH):
+        chunk = uniq[i:i + CIPROUTER_BATCH]
+        out = ciprouter_translate(chunk, CIPROUTER_MODEL_PRIMARY)
+        if _batch_ok(chunk, out):
+            _simpan(chunk, out, "step")
+        print(f"  [tr] step {min(i + CIPROUTER_BATCH, len(uniq))}/{len(uniq)}", flush=True)
+        save_cache()
+
+    # Rung 2: auto, batch — hanya baris yang belum masuk cache.
+    still = _belum()
+    if still:
+        print(f"  [tr] {len(still)} baris -> auto (fallback)", flush=True)
+        for i in range(0, len(still), CIPROUTER_BATCH):
+            chunk = still[i:i + CIPROUTER_BATCH]
+            out = ciprouter_translate(chunk, CIPROUTER_MODEL_FALLBACK)
+            if _batch_ok(chunk, out):
+                _simpan(chunk, out, "auto")
+            print(f"  [tr] auto {min(i + CIPROUTER_BATCH, len(still))}/{len(still)}", flush=True)
             save_cache()
 
-    # Fallback terakhir: retry per baris lewat LLM (model kedua dulu di dalam
-    # llm_translate). Baris yang lolos di sini masuk cache seperti biasa.
-    still_failed = [zh for zh in failed
-                    if zh not in _cache or has_mandarin(_cache.get(zh, zh))]
-    if still_failed:
-        print(f"  [tr] {len(still_failed)} baris -> LLM per baris (retry terakhir)", flush=True)
-        for n, zh in enumerate(still_failed, 1):
-            out = llm_translate_single(zh)
-            if out:
-                _cache[zh] = out
-                _cache_prov[zh] = "llm"
-                stats["llm"] += 1
+    # Rung 3: retry per baris lewat auto.
+    still = _belum()
+    if still:
+        print(f"  [tr] {len(still)} baris -> auto per baris (retry terakhir)", flush=True)
+        for n, zh in enumerate(still, 1):
+            out = ciprouter_translate([zh], CIPROUTER_MODEL_FALLBACK)
+            if _batch_ok([zh], out):
+                _simpan([zh], out, "auto")
             if n % 5 == 0:
                 save_cache()
         save_cache()
-
-    # Polish LLM: baris dari MyMemory/Google ditulis ulang supaya natural.
-    # DeepL tidak ikut (kualitasnya sudah bagus), baris dari cache lama
-    # (provider tidak tercatat) ikut sekali lalu ditandai "polished"
-    # supaya tidak di-polish lagi di run berikutnya.
-    if POLISH_WITH_LLM and TIPROUTER_API_KEY:
-        all_zh = list(dict.fromkeys(
-            (s.get("text_zh") or "").strip() for s in segs
-            if (s.get("text_zh") or "").strip()))
-        cands = [zh for zh in all_zh
-                 if _cache_prov.get(zh) in (None, "mymemory", "google")
-                 and _cache.get(zh) and not has_mandarin(_cache[zh])]
-        if cands:
-            print(f"  [tr] polish LLM {len(cands)} baris (MyMemory/Google/cache lama)", flush=True)
-            for i in range(0, len(cands), LLM_BATCH):
-                chunk = cands[i:i + LLM_BATCH]
-                out = llm_polish([_cache[zh] for zh in chunk])
-                if out:
-                    for zh, id_ in zip(chunk, out):
-                        old = _cache[zh]
-                        if (id_ and id_ != old and not has_mandarin(id_)
-                                and 0.5 * len(old) <= len(id_) <= 2.0 * len(old)):
-                            _cache[zh] = _clean_id(id_)
-                            _cache_prov[zh] = "polished"
-                            stats["polish"] += 1
-                print(f"  [tr] polish {min(i + LLM_BATCH, len(cands))}/{len(cands)}", flush=True)
-            save_cache()
 
     for s in segs:
         zh = (s.get("text_zh") or "").strip()
@@ -411,13 +368,13 @@ def translate_segments(segs):
         if zh and not s.get("text_id"):
             failed_final.append({"start": s.get("start"), "end": s.get("end"),
                                  "text_zh": zh, "reason": "all_providers_failed"})
-    print(f"  [tr] DeepL={stats['deepl']} Google={stats['google']} MyMemory={stats['mymemory']} "
-          f"LLM={stats['llm']} polish={stats['polish']} gagal={len(failed_final)} | {done}/{len(segs)} segmen",
-          flush=True)
+    print(f"  [tr] step={stats['step']} auto={stats['auto']} "
+          f"gagal={len(failed_final)} | {done}/{len(segs)} segmen", flush=True)
     return segs, failed_final
 
 
 # ========================= tahap 2: Translate =========================
+t_tr0 = time.time()
 exts = (".mp4", ".mkv", ".webm", ".mov", ".avi")
 videos = sorted([p for p in glob.glob(os.path.join(EPISODES_DIR, "*")) if p.lower().endswith(exts)],
                 key=natural_key)[:MAX_EPISODES]
@@ -443,10 +400,9 @@ for i, vid_path in enumerate(videos, 1):
     missing = sum(1 for s in segs if (s.get("text_zh") or "").strip()
                   and not (s.get("text_id") or "").strip())
     if not missing and os.path.exists(out_id_srt):
-        # Sudah diterjemah, tapi: kartu nama mungkin belum dibuang, baris
-        # MyMemory/Google/cache lama belum di-polish, kutip belum dibersihkan.
-        # Jalankan translate_segments: semua baris dari cache, jadi tidak ada
-        # terjemahan ulang — hanya polish + cleanup yang jalan.
+        # Sudah diterjemah, tapi: kartu nama mungkin belum dibuang dan kutip
+        # belum dibersihkan. Jalankan translate_segments: semua baris dari
+        # cache, jadi tidak ada terjemahan ulang — hanya cleanup yang jalan.
         segs, failed_final = translate_segments(segs)
         payload["segments"] = segs
         if failed_final:
@@ -496,4 +452,4 @@ for i, vid_path in enumerate(videos, 1):
     # Validator: tolak SRT yang tidak valid / masih berisi Mandarin
     assert_valid_segments(segs, where=f"translate {stem}")
 
-print("[tr] selesai", flush=True)
+print(f"[tr] selesai {time.time() - t_tr0:.1f} dtk", flush=True)

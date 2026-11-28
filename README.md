@@ -18,7 +18,7 @@ tetap sama secara manual.
 2. **Whisper (cell terpisah)** — faster-whisper large-v3-turbo, bahasa Mandarin
    dikunci, untuk merapikan timing OCR dari ±1 detik ke ~0,1–0,2 detik dan
    mengisi baris yang kelewat OCR. Teks tetap dari OCR, timing dari Whisper.
-3. **Translate** — gratis dulu (DeepL → Google → MyMemory), sisa gagal baru LLM.
+3. **Translate** — CipRouter API: step-3.7-flash dulu, gagal → auto, gagal → daftar review.
    Cache per baris, jadi baris yang sudah diterjemah tidak diulang. **Tidak ada
    baris yang dibiarkan Mandarin di SRT Indonesia** — lihat bagian Translate.
 4. **Blur + Burn** — band blur dihitung dari bbox teks, lalu blur dan subtitle ID
@@ -64,8 +64,8 @@ Termux sengaja tidak ada, tidak direkomendasikan). Notebook: pilih PROFILE di
 cell config, atau generate varian Kaggle dengan
 `python3 notebook/build_colab_nb.py --profile kaggle`.
 
-Env opsional: `TIPROUTER_API_KEY` (fallback LLM), `DEEPL_API_KEY` (translator gratis
-pertama). Tanpa keduanya pipeline tetap jalan lewat Google/MyMemory.
+Env: `TIPROUTER_API_KEY` (wajib untuk translate CipRouter; tanpa ini semua baris
+masuk daftar review).
 
 Detail parameter, resume, dan angka ukur ada di [docs/GUIDE-LOCAL.md](docs/GUIDE-LOCAL.md).
 
@@ -90,9 +90,9 @@ tanpa mengulang pekerjaan yang sudah selesai.
   dijalankan, timing dirapikan ke ~0,1–0,2 detik** (teks dari OCR, timing dari
   Whisper) dan baris yang kelewat OCR tapi terdengar di Whisper ditambahkan
   dengan penanda sumber.
-- Translator gratis bisa kena rate limit; **baris yang gagal di semua jalur tidak
-  dibiarkan Mandarin** — dicoba ulang per baris lewat LLM, lalu masuk daftar
-  review (`output/per_episode/*_review.json`) kalau masih gagal. SRT Indonesia
+- **Baris yang gagal di semua jalur tidak dibiarkan Mandarin** — dicoba step,
+  lalu auto (batch + per baris), lalu masuk daftar review
+  (`output/per_episode/*_review.json`) kalau masih gagal. SRT Indonesia
   dijamin tidak berisi baris Mandarin yang belum diterjemah; validator SRT
   menolak hasil yang masih berisi baris seperti itu.
 - Resume per episode sekarang memeriksa fingerprint konfigurasi (FPS, ROI,

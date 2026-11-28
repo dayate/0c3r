@@ -25,14 +25,16 @@ Colab, dengan komputasi di GPU remote (Colab T4).
 | D3 | Bahasa sumber | `zh` saja untuk saat ini (Mandarin dulu) |
 | D4 | Bahasa target | `id` |
 | D5 | Format output | **SRT saja** (ASS/VTT pasca-MVP) + video hardsub ID |
-| D6 | Terjemahan | Gratis dulu (DeepL → Google → MyMemory), LLM fallback; **tidak ada baris Mandarin yang dibiarkan di SRT ID**. Baris MyMemory/Google di-polish LLM (kalau ada key); kartu nama/peran difilter, tanda kutip pembungkus dibersihkan |
+| D6 | Terjemahan | CipRouter API: step-3.7-flash → auto (batch 8) → auto per baris; **tidak ada baris Mandarin yang dibiarkan di SRT ID**. Kartu nama/peran difilter, tanda kutip pembungkus dibersihkan |
 | D7 | Jalur pipeline | **Jalur 3 (hardsub/OCR + Whisper timing) saja**; Jalur 1 softsub dan Jalur 2 Whisper-only ditunda |
-| D8 | ASR model | Tergantung profil (`profiles.yaml`): GPU (colab/kaggle) `large-v3-turbo` beam 5; CPU (pc/vm/instabox) `small` beam 1 (greedy) — hanya untuk timing/fusi, bukan transkrip utama. Bahasa `zh` dikunci, VAD mati, temperature 0,0, word timestamp nyala |
+| D8 | ASR model | Semua profil `small` beam 1 (greedy) sejak 2026-11-28 (tes ep 1) — hanya untuk timing/fusi, bukan transkrip utama. Bahasa `zh` dikunci, VAD mati, temperature 0,0, word timestamp nyala |
 | D9 | Chunk | 600 detik, idempoten, resumable |
 | D10 | Privasi | File sumber hanya untuk pemrosesan; tidak untuk training |
 | D11 | Mesin OCR | Tergantung profil: GPU (colab/kaggle) **RapidOCR 3.x + onnxruntime-gpu** (PP-OCRv6, `out = eng(arr)`, CUDA wajib lolos assert — tes 2026-11-27: 0,62 dtk/frame, 8,4x vs CPU, teks identik); CPU (pc/vm/instabox) **rapidocr-onnxruntime 1.2.3** (3.x di CPU malah lebih lambat, 5,25 vs 2,9 dtk/frame). Engine ikut fingerprint, jadi ganti engine = checkpoint OCR lama tidak dipakai ulang |
-| D12 | Blur | `static` dan `dynamic` tetap tersedia sebagai opsi; default `dynamic` (radius 20, power 3, jendela ±0,4 detik) sejak 2026-11-27 — band statis meninggalkan bayangan glyph di latar gelap dan mengaburkan wajah di area tanpa teks |
+| D12 | Blur | `none` (V0, tanpa blur), `static` dan `dynamic` tetap tersedia sebagai opsi; default `none` sejak 2026-11-28, keputusan Taufik setelah perbandingan V0/static/box (V0 tercepat, 32,3 dtk vs static 41,2 di T4) |
 | D13 | Profil per device | Satu kode, setting per device di `profiles.yaml` (colab, kaggle, pc, vm, instabox — Termux sengaja tidak ada, tidak direkomendasikan). Notebook: pilih PROFILE di cell config, atau `build_colab_nb.py --profile kaggle` (Colab 25 cell, Kaggle 24 cell; judul section jadi markdown cell, PROFILES di cell tersendiri yang pretty-print). Lokal: `local_pipeline.py --profile pc`. Ganti profil = fingerprint berubah = cache/checkpoint lama tidak dipakai |
+| D14 | Re-scan baris hilang | Segmen Whisper-only di-OCR ulang dengan sampling rapat 0,25 dtk (interval ±0,2 dtk) + upscale 4; yang pulih jadi source=`ocr-rescan`, yang tidak pulih tetap `asr`. Parameter (`RESCAN_STEP/PAD/UPSCALE/MIN_DUR`) ikut fingerprint Whisper |
+| D15 | Batch per sesi | 20–30 episode per sesi Colab (pola pakai, bukan kode; `MAX_EPISODES` default 200 hanya batas atas). Sesi Colab gratis punya batas waktu/GPU, jadi bagi job besar jadi beberapa sesi; checkpoint per episode + fingerprint membuat resume aman |
 
 ## 3. Ruang lingkup MVP
 
@@ -40,8 +42,8 @@ Colab, dengan komputasi di GPU remote (Colab T4).
 
 - [ ] Cell OCR — Jalur 3 bagian OCR, RapidOCR di T4, ROI subtitle Mandarin
 - [ ] Cell Whisper (terpisah) — timing + fusi OCR-Whisper, faster-whisper di T4
-- [ ] Cell translate — gratis dulu, LLM fallback berlapis, **jaminan 0 baris Mandarin di SRT ID**, daftar review untuk baris yang masih gagal
-- [ ] Cell blur + burn — mode `static` dan `dynamic` sebagai opsi
+- [ ] Cell translate — CipRouter step → auto, **jaminan 0 baris Mandarin di SRT ID**, daftar review untuk baris yang masih gagal
+- [ ] Cell blur + burn — mode `none`, `static` dan `dynamic` sebagai opsi
 - [ ] Resume per episode dengan cek fingerprint konfigurasi
 - [ ] Validator SRT: timestamp monoton, tidak overlap, ≤2 baris, ≤42 char/baris, durasi 1,0–7,0 detik, 0 baris Mandarin di SRT ID
 - [ ] Manifest per job (`job.json`), status per chunk, checksum
@@ -74,8 +76,8 @@ Cell 2 — Install (RapidOCR, deep-translator, font)
 Cell 3 — Konfigurasi (path Drive, API key, ROI, blur, dsb.)
 Cell 4 — OCR (Mandarin, RapidOCR, checkpoint per chunk)
 Cell 4b — Whisper timing + fusi (cell terpisah, boleh dilewati)
-Cell 5 — Translate (gratis dulu, LLM fallback berlapis)
-Cell 6 — Blur + Burn (static / dynamic)
+Cell 5 — Translate (CipRouter step → auto)
+Cell 6 — Blur + Burn (none / static / dynamic)
 Cell 7 — Merge SRT
 Cell 8 — Merge video (opsional)
 ```
@@ -147,12 +149,10 @@ memberi timing kata yang jauh lebih rapat.
 - Temperature: 0–0,2.
 - Glosarium: diinjeksi ke prompt (pre) **dan** verifikasi pasca (post) — jika nama tidak muncul sesuai glosarium, baris ditandai.
 - Mode:
-  - `fast` — DeepL untuk semua baris.
-  - `balanced` (default) — gratis dulu (DeepL → Google → MyMemory), LLM fallback.
+  - `balanced` (default) — CipRouter step-3.7-flash → auto.
   - `quality` — LLM dengan konteks adegan lebih lebar + instruksi gaya.
 - **Jaminan tidak ada baris gagal:** urutan fallback per baris unik adalah
-  DeepL → Google → MyMemory → LLM batch (20 baris) → LLM per baris (retry
-  2x, jeda backoff) → LLM model kedua. Baris yang masih gagal setelah semua
+  step batch (8 baris) → auto batch (8 baris) → auto per baris. Baris yang masih gagal setelah semua
   itu **tidak** ditulis Mandarin ke SRT ID — baris itu ditulis ke
   `*_review.json` (teks Mandarin + alasan gagal + provider terakhir) dan
   cell translate berhenti dengan status gagal yang jelas, bukan selesai

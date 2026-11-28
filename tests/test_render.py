@@ -1,8 +1,9 @@
 """Smoke test: render 4s video dengan blur always-on + progress + ASS."""
-import os, subprocess, sys, tempfile
+import json, os, subprocess, sys, tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import local_pipeline as lp
+_real_llm_translate = lp.llm_translate  # simpan sebelum tes-tes di bawah men-stub-nya
 
 lp.setup_logging()
 td = tempfile.mkdtemp()
@@ -36,7 +37,7 @@ fc2, _ = lp.build_blur(segs, band, 640, 360, "static")
 assert "enable=" in fc2
 print("FILTER OK")
 
-# --- translate: gratis saja (DeepL -> Google -> MyMemory), tanpa LLM ---
+# --- translate: gratis dulu, LLM fallback (D4) ---
 lp.TR_CACHE_PATH = os.path.join(td, "cache.json")
 lp._cache.clear()
 calls = []
@@ -46,6 +47,7 @@ def fake_free(t):
     return ({"你好": "Halo", "再见": "Sampai jumpa"}.get(t, "Terjemahan"), "google")
 
 lp.deepl_translate = lambda t: None
+lp.llm_translate = lambda lines: None
 lp.google_translate = fake_free
 segs2 = [{"text_zh": "你好"}, {"text_zh": "再见"}, {"text_zh": "你好"}]
 segs2, failed2 = lp.translate_segments(segs2)
@@ -54,15 +56,26 @@ assert calls == ["你好", "再见"], calls
 assert segs2[0]["text_id"] == "Halo" and segs2[2]["text_id"] == "Halo"
 print("TRANSLATE OK")
 
-# --- translate: gagal di semua jalur gratis -> masuk daftar gagal, text_id kosong ---
+# --- translate: gagal di jalur gratis -> LLM yang ambil alih ---
 lp._cache.clear()
 lp.google_translate = lambda t: (None, None)
+lp.llm_translate = lambda lines: ["Tes" for _ in lines]
+segs3 = [{"text_zh": "测试"}]
+segs3, failed3 = lp.translate_segments(segs3)
+assert failed3 == [], failed3
+assert segs3[0]["text_id"] == "Tes", segs3
+assert lp._cache_prov.get("测试") == "llm", lp._cache_prov
+print("TRANSLATE LLM OK")
+
+# --- translate: gagal di semua jalur -> masuk daftar gagal, text_id kosong ---
+lp._cache.clear()
+lp.google_translate = lambda t: (None, None)
+lp.llm_translate = lambda lines: None
 segs4 = [{"text_zh": "你好"}]
 segs4, failed4 = lp.translate_segments(segs4)
 assert len(failed4) == 1 and failed4[0]["text_zh"] == "你好", failed4
 assert segs4[0]["text_id"] == "", segs4
 assert lp.validate_segments(segs4), "validator harus menolak baris belum diterjemah"
-assert not hasattr(lp, "llm_translate"), "versi lokal tidak boleh punya jalur LLM"
 print("TRANSLATE FAIL OK")
 
 # --- translate: baris non-Mandarin diteruskan apa adanya, provider tidak dipanggil ---
@@ -76,6 +89,7 @@ def _deepl_rec(t):
 
 lp.deepl_translate = _deepl_rec
 lp.google_translate = lambda t: (None, None)
+lp.llm_translate = lambda lines: None
 segs_p = [{"text_zh": "ALSURR 120."}, {"text_zh": "你好"}]
 segs_p, failed_p = lp.translate_segments(segs_p)
 assert len(failed_p) == 1 and failed_p[0]["text_zh"] == "你好", failed_p
@@ -141,7 +155,70 @@ _many = [{"start": 0, "end": 1, "text_zh": "x"} for _ in range(lp.DYNAMIC_MAX_BO
 assert lp._blur_mode_for(_many, "dynamic") == "static"
 assert lp._blur_mode_for(_many[:-1], "dynamic") == "dynamic"
 assert lp._blur_mode_for(_many, "static") == "static"
+assert lp._blur_mode_for(_many, "none") == "none"
 print("BLUR GUARD OK")
+
+# --- blur none (V0, default sejak 2026-11-28): tanpa blur, subtitle dibakar apa adanya ---
+assert lp.build_blur(segs, band, 640, 360, "none") == (None, None)
+out_none = os.path.join(td, "out_none.mp4")
+enc_n, t_n = lp.render_hardsub(src, "", out_none, segs, 640, 360, blur_mode="none")
+assert os.path.getsize(out_none) > 0
+print("BLUR NONE OK", enc_n, round(t_n, 2), "s", os.path.getsize(out_none), "bytes")
+
+# --- output 720p (2026-11-28): video 1920x1080 -> 1280x720 ---
+big = os.path.join(td, "big.mp4")
+subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=1920x1080:rate=24",
+                "-t", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p", big], check=True)
+assert lp.output_size(1920, 1080) == (1280, 720), lp.output_size(1920, 1080)
+assert lp.output_size(1080, 1920) == (720, 1280), lp.output_size(1080, 1920)
+assert lp.output_size(640, 360) is None
+out_big = os.path.join(td, "out_big.mp4")
+lp.OUTPUT_720P = True
+enc_b, t_b = lp.render_hardsub(big, "", out_big, segs, 1920, 1080)
+assert lp.probe(out_big)[1:] == (1280, 720), lp.probe(out_big)
+lp.OUTPUT_720P = False
+out_big2 = os.path.join(td, "out_big2.mp4")
+lp.render_hardsub(big, "", out_big2, segs, 1920, 1080)
+assert lp.probe(out_big2)[1:] == (1920, 1080), lp.probe(out_big2)
+lp.OUTPUT_720P = True
+# Jalur blur (filter_complex) + scale juga harus 720p.
+out_big3 = os.path.join(td, "out_big3.mp4")
+lp.render_hardsub(big, "", out_big3, segs, 1920, 1080, blur_mode="static")
+assert lp.probe(out_big3)[1:] == (1280, 720), lp.probe(out_big3)
+print("OUTPUT 720P OK", enc_b, round(t_b, 2), "s", os.path.getsize(out_big), "bytes")
+
+# --- NVENC preset p5 (2026-11-28), bukan p6 ---
+_lp_src = open(lp.__file__, encoding="utf-8").read()
+assert '"-preset", "p5"' in _lp_src and '"p6"' not in _lp_src, "preset NVENC harus p5"
+print("NVENC PRESET OK")
+
+# --- translate: override nama diterapkan sebelum request LLM ---
+import urllib.request as _urlreq2
+_seen2 = {}
+class _FakeResp2:
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def read(self):
+        return json.dumps({"choices": [{"message": {"content": '["Halo Han Muchen"]'}}]}).encode("utf-8")
+def _fake_urlopen2(req, timeout=None):
+    _seen2["data"] = req.data.decode("utf-8")
+    return _FakeResp2()
+_real2 = _urlreq2.urlopen
+_rk2 = os.environ.get("TIPROUTER_API_KEY")
+os.environ["TIPROUTER_API_KEY"] = "test-key"
+try:
+    _urlreq2.urlopen = _fake_urlopen2
+    _out2 = _real_llm_translate(["韩沐宸你好"])
+finally:
+    _urlreq2.urlopen = _real2
+    if _rk2 is None:
+        del os.environ["TIPROUTER_API_KEY"]
+    else:
+        os.environ["TIPROUTER_API_KEY"] = _rk2
+assert _out2 == ["Halo Han Muchen"], _out2
+assert "Han Muchen" in _seen2["data"] and "韩沐宸" not in _seen2["data"], _seen2["data"]
+assert lp.apply_name_overrides("温薏和闺蜜") == "Wen Yi和sahabat"
+print("TRANSLATE NAME OVERRIDE OK")
 
 # --- translate: kutip dibersihkan, tanpa polish/fallback LLM ---
 lp._cache.clear()
@@ -178,6 +255,37 @@ assert _fused[0]["start"] == 0.2 and _fused[0]["end"] == 1.8, _fused
 assert _fstats["whisper_only"] == 1 and len(_fused) == 2, (_fstats, _fused)
 assert _fused[1]["source"] == "asr", _fused
 print("LOCAL FUSE OK")
+
+# --- re-scan target: segmen Whisper-only di-OCR ulang (stub engine) ---
+_orig_engine = lp.get_engine
+_orig_crop = lp.load_crop
+_orig_batch = lp.ocr_batch
+_old_up = lp.UPSCALE
+lp.get_engine = lambda: object()
+lp.load_crop = lambda p: (None, 640, 360, 600, 300, True)
+_calls = {"n": 0}
+def _fake_batch(engine, frames):
+    _calls["n"] += 1
+    return [("我要睡了", [0.4, 0.66, 0.6, 0.72])] if _calls["n"] == 2 else [("", None)]
+lp.ocr_batch = _fake_batch
+_fused2 = [
+    {"start": 0.0, "end": 0.5, "text_zh": "你好", "bbox": [0.2, 0.66, 0.8, 0.72],
+     "source": "ocr", "conflict": False, "timing_unverified": False},
+    {"start": 1.0, "end": 1.6, "text_zh": "睡了", "bbox": None,
+     "source": "asr", "conflict": False, "timing_unverified": False},
+    {"start": 2.0, "end": 2.6, "text_zh": "干杯", "bbox": None,
+     "source": "asr", "conflict": False, "timing_unverified": False},
+]
+_out, _rstats = lp.rescan_misses(src, _fused2)
+lp.get_engine, lp.load_crop, lp.ocr_batch = _orig_engine, _orig_crop, _orig_batch
+assert _rstats == {"rescanned": 2, "recovered": 1, "still_missing": 1}, _rstats
+_rec = [s for s in _out if s["start"] == 1.0][0]
+assert _rec["text_zh"] == "我要睡了" and _rec["source"] == "ocr-rescan", _rec
+assert _rec["bbox"] == [0.4, 0.66, 0.6, 0.72], _rec
+_miss = [s for s in _out if s["start"] == 2.0][0]
+assert _miss["source"] == "asr" and _miss["text_zh"] == "干杯", _miss
+assert lp.UPSCALE == _old_up, lp.UPSCALE  # upscale dikembalikan setelah re-scan
+print("LOCAL RESCAN OK")
 
 # --- paralel: OCR + Whisper jalan berbarengan, bukan antre ---
 import time as _time
@@ -245,13 +353,13 @@ if _ilu2.find_spec("yaml") is not None:
     assert _profs["colab"]["mount_drive"] is True
     assert _profs["kaggle"]["mount_drive"] is False
     assert _profs["kaggle"]["episodes_dir"].startswith("/kaggle/input/")
-    assert _profs["colab"]["fps"] == 1.0 and _profs["colab"]["whisper_model"] == "large-v3-turbo"
-    assert _profs["colab"]["whisper_beam"] == 5
+    assert _profs["colab"]["fps"] == 0.5 and _profs["colab"]["whisper_model"] == "small"
+    assert _profs["colab"]["whisper_beam"] == 1
     assert _profs["pc"]["fps"] == 0.5 and _profs["pc"]["whisper_model"] == "small"
     assert _profs["pc"]["whisper_beam"] == 1
     lp.apply_profile("colab")
-    assert lp.PROFILE == "colab" and lp.FPS == 1.0
-    assert lp.WHISPER_MODEL == "large-v3-turbo" and lp.WHISPER_BEAM == 5
+    assert lp.PROFILE == "colab" and lp.FPS == 0.5
+    assert lp.WHISPER_MODEL == "small" and lp.WHISPER_BEAM == 1
     assert lp.OCR_ENGINE == "rapidocr3-gpu"
     assert lp.fingerprint()["profile"] == "colab"
     assert lp.fingerprint()["ocr"] == "rapidocr3-gpu"

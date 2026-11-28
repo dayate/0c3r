@@ -43,6 +43,10 @@ WHISPER_MODEL = globals().get("WHISPER_MODEL", "small")
 WHISPER_BEAM = globals().get("WHISPER_BEAM", 1)
 WHISPER_LANG = globals().get("WHISPER_LANG", "zh")
 WHISPER_MAX_SHIFT = 1.5  # detik, batas geser timing OCR ke timing Whisper
+RESCAN_STEP = globals().get("RESCAN_STEP", 0.25)
+RESCAN_PAD = globals().get("RESCAN_PAD", 0.2)
+RESCAN_UPSCALE = globals().get("RESCAN_UPSCALE", 4)
+RESCAN_MIN_DUR = globals().get("RESCAN_MIN_DUR", 0.2)
 
 
 # Util (didupikasi dari cell OCR supaya cell ini bisa jalan sendiri)
@@ -100,6 +104,10 @@ def _whisper_fingerprint():
         "beam_size": WHISPER_BEAM,
         "word_timestamps": True,
         "chunk_seconds": CHUNK_SECONDS,
+        "rescan_step": RESCAN_STEP,
+        "rescan_pad": RESCAN_PAD,
+        "rescan_upscale": RESCAN_UPSCALE,
+        "rescan_min_dur": RESCAN_MIN_DUR,
     }
 
 
@@ -312,6 +320,80 @@ def fuse_segments(ocr_segs, whisper_segs):
     return fused, stats
 
 
+def rescan_misses(vid_path, fused):
+    """Re-scan target: segmen Whisper-only (suara ada, OCR tidak menemukan
+    teks) di-OCR ulang dengan sampling rapat di sekitar intervalnya.
+    Return (fused_baru, stats). Segmen yang pulih jadi source="ocr-rescan"
+    (teks dari OCR, timing tetap dari Whisper); yang tidak pulih tetap
+    source="asr" seperti sebelumnya — tidak ada yang hilang.
+
+    Butuh fungsi OCR dari cell OCR (get_engine/load_crop/ocr_batch/
+    _merge_boxes). Kalau cell OCR belum jalan di sesi ini (mis. resume dari
+    sesi lama), re-scan dilewati dengan pesan — jalankan cell OCR dulu
+    kalau mau re-scan ikut jalan.
+    Kasus nyata (ep 1): 睡了 (2 karakter kecil, ~5,5 dtk) dan 干杯
+    (transisi 55 dtk) lolos dari sampling 0,5 fps; upscale 3 di frame
+    5,5 dtk tidak menemukan apa-apa, jadi re-scan pakai sampling rapat
+    0,25 dtk + upscale lebih besar (RESCAN_UPSCALE)."""
+    stats = {"rescanned": 0, "recovered": 0, "still_missing": 0}
+    need = ("get_engine", "load_crop", "ocr_batch", "_merge_boxes")
+    if any(n not in globals() for n in need):
+        print("  [rescan] fungsi OCR tidak ada di sesi ini, dilewati "
+              "(jalankan cell OCR dulu)", flush=True)
+        return fused, stats
+    engine = get_engine()
+    tmpd = os.path.join(WORK_DIR, "rescan")
+    os.makedirs(tmpd, exist_ok=True)
+    out = []
+    for s in fused:
+        if s.get("source") != "asr":
+            out.append(s)
+            continue
+        dur_s = float(s["end"]) - float(s["start"])
+        if dur_s < RESCAN_MIN_DUR:
+            out.append(s)
+            stats["still_missing"] += 1
+            continue
+        stats["rescanned"] += 1
+        t0 = max(0.0, float(s["start"]) - RESCAN_PAD)
+        t1 = float(s["end"]) + RESCAN_PAD
+        times, t = [], t0
+        while t <= t1 + 1e-9:
+            times.append(round(t, 3))
+            t += RESCAN_STEP
+        found = {}  # teks -> [bbox...]
+        global UPSCALE
+        _old_up = globals().get("UPSCALE", 1)
+        try:
+            UPSCALE = RESCAN_UPSCALE
+            for t in times:
+                fp = os.path.join(tmpd, "r.png")
+                r = subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", f"{t:.3f}",
+                                    "-i", vid_path, "-frames:v", "1", fp],
+                                   capture_output=True)
+                if r.returncode != 0 or not os.path.exists(fp):
+                    continue
+                arr, _w, _h, cw, ch, gate = load_crop(fp)
+                if not gate:
+                    continue
+                txt, box = ocr_batch(engine, [(arr, cw, ch)])[0]
+                if txt and box:
+                    found.setdefault(txt, []).append(box)
+        finally:
+            UPSCALE = _old_up
+        if not found:
+            out.append(s)
+            stats["still_missing"] += 1
+            continue
+        best = max(found.items(), key=lambda kv: len(kv[1]))[0]
+        out.append({**s, "text_zh": best, "bbox": _merge_boxes(found[best]),
+                    "source": "ocr-rescan", "conflict": False})
+        stats["recovered"] += 1
+    shutil.rmtree(tmpd, ignore_errors=True)
+    out.sort(key=lambda s: (float(s["start"]), float(s["end"])))
+    return out, stats
+
+
 # ========================= tahap 4b: Whisper =========================
 exts = (".mp4", ".mkv", ".webm", ".mov", ".avi")
 videos = sorted([p for p in glob.glob(os.path.join(EPISODES_DIR, "*")) if p.lower().endswith(exts)],
@@ -371,6 +453,11 @@ for i, vid_path in enumerate(videos, 1):
     whisper_segs.sort(key=lambda x: float(x["start"]))
 
     fused, stats = fuse_segments(ocr_segs, whisper_segs)
+    fused, rstats = rescan_misses(vid_path, fused)
+    if rstats["rescanned"]:
+        print(f"[whisper] {i}/{len(videos)} {stem}: re-scan {rstats['rescanned']} "
+              f"segmen Whisper-only, pulih {rstats['recovered']}, "
+              f"tetap hilang {rstats['still_missing']}", flush=True)
     # Fusi bisa menimbulkan overlap (timing OCR digeser ke timing kata
     # Whisper + segmen Whisper-only disisipkan). Rapikan di sini kalau
     # normalisasi tersedia; kalau tidak (mis. cell 3b lama yang jalan),

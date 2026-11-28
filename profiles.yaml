@@ -32,7 +32,7 @@ defaults:
   max_width: 1080
   batch_size: 8
   min_dur: 0.35
-  blur_mode: dynamic
+  blur_mode: none         # default V0 sejak 2026-11-28 (keputusan Taufik)
   blur_radius: 20
   blur_time_pad: 0.4
   always_blur: true
@@ -47,12 +47,14 @@ profiles:
     ocr_engine: rapidocr3-gpu
     episodes_dir: /content/drive/MyDrive/duanju/episodes
     base_out_dir: /content/drive/MyDrive/duanju/suba_hardsub
-    fps: 1.0
+    # 0,5 fps + Whisper small sejak 2026-11-28 (tes ep 1: hemat ~60+15 dtk,
+    # cek baris hilang vs run 1,0 fps).
+    fps: 0.5
     roi: [0.05, 0.55, 0.95, 0.93]
     min_conf: 0.55
     upscale: 3
-    whisper_model: large-v3-turbo
-    whisper_beam: 5
+    whisper_model: small
+    whisper_beam: 1
 
   kaggle:
     platform: kaggle
@@ -60,12 +62,13 @@ profiles:
     ocr_engine: rapidocr3-gpu
     episodes_dir: /kaggle/input/duanju-episodes
     base_out_dir: /kaggle/working/suba_hardsub
-    fps: 1.0
+    # 0,5 fps + Whisper small sejak 2026-11-28 (sama seperti colab).
+    fps: 0.5
     roi: [0.05, 0.55, 0.95, 0.93]
     min_conf: 0.55
     upscale: 3
-    whisper_model: large-v3-turbo
-    whisper_beam: 5
+    whisper_model: small
+    whisper_beam: 1
 
   pc:
     platform: local

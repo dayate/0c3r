@@ -5,11 +5,12 @@ yang bisa dijalankan ulang sendiri-sendiri:
 
 1. **OCR** — RapidOCR (gratis) sampling `FPS=1` di ROI subtitle, checkpoint per chunk.
 2. **Whisper (cell terpisah)** — faster-whisper large-v3-turbo, bahasa Mandarin dikunci, merapikan timing OCR dari ±1 detik ke ~0,1–0,2 detik dan mengisi baris yang kelewat OCR.
-3. **Translate** — gratis dulu (DeepL → Google → MyMemory), sisa gagal baru LLM berlapis. Cache per baris, jadi baris yang sudah diterjemah tidak diulang. **Tidak ada baris Mandarin yang dibiarkan di SRT Indonesia.**
+3. **Translate** — CipRouter API: step-3.7-flash dulu, gagal → auto, gagal → daftar review. Cache per baris, jadi baris yang sudah diterjemah tidak diulang. **Tidak ada baris Mandarin yang dibiarkan di SRT Indonesia.**
 4. **Blur + Burn** — band blur dihitung dari bbox teks, lalu blur + subtitle ID dibakar dalam satu pass ffmpeg.
 
-Catatan blur:
+Catatan blur (default `BLUR_MODE="none"` / V0 sejak 2026-11-28):
 
+- `BLUR_MODE="none"` = tanpa blur — subtitle ID dibakar apa adanya, paling cepat.
 - `ALWAYS_BLUR=True` (default) membuat band selalu blur sepanjang video. Ini yang
   menutup kasus OCR miss — subtitle Mandarin di celah yang tidak terdeteksi tetap
   tertutup, dan subtitle Indonesia selalu dibakar di posisi band yang sama.

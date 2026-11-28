@@ -16,8 +16,9 @@ BASE_OUT_DIR = "/content/drive/MyDrive/duanju/suba_hardsub"
 MAX_EPISODES = 200
 
 # --- Parameter OCR ---
-FPS = 1.0               # colab/kaggle 1 fps (Whisper GPU cepat, OCR 2 vCPU
-                        # masih sanggup); pc/vm 0,5 fps
+FPS = 0.5               # semua profil 0,5 fps sejak 2026-11-28 (tes ep 1:
+                        # hemat ~60 dtk OCR, hilang ~7 baris — fusi Whisper
+                        # menambal timing kasar)
 # Mesin OCR (dari profil, lihat profiles.yaml):
 #   rapidocr3-gpu = RapidOCR 3.x + onnxruntime-gpu, colab/kaggle (tes: 8,4x
 #     lebih cepat dari CPU, 0,62 vs 5,25 dtk/frame, teks identik).
@@ -35,21 +36,32 @@ CHUNK_SECONDS = 600     # checkpoint OCR per chunk, aman di-interrupt
 
 # --- Parameter Whisper (timing) ---
 # Whisper HANYA dipakai buat timing + cadangan; teks tetap dari OCR.
-# Di GPU (colab/kaggle) large-v3-turbo tetap cepat; di CPU (pc/vm)
-# pakai "small" beam 1 yang ~4-6x lebih cepat.
-WHISPER_MODEL = "large-v3-turbo"
-WHISPER_BEAM = 5        # beam 5 (di CPU pakai 1 = greedy, tercepat)
+# Semua profil pakai "small" beam 1 (greedy) sejak 2026-11-28 (tes ep 1):
+# di T4 tetap cepat dan hemat ~10-15 dtk vs large-v3-turbo beam 5.
+WHISPER_MODEL = "small"
+WHISPER_BEAM = 1        # beam 1 = greedy, tercepat
 WHISPER_LANG = "zh"
 
+# --- Parameter Re-scan (baris hilang) ---
+# Segmen Whisper-only (suara ada, OCR tidak menemukan teks) di-OCR ulang
+# dengan sampling rapat di sekitar intervalnya + upscale lebih besar.
+# Kasus nyata: 睡了 (2 karakter kecil, ~5,5 dtk) dan 干杯 (transisi 55 dtk)
+# lolos dari sampling 0,5 fps.
+RESCAN_STEP = 0.25      # langkah sampling re-scan (detik)
+RESCAN_PAD = 0.2        # perluasan interval re-scan di kedua ujung
+RESCAN_UPSCALE = 4      # upscale re-scan (lebih besar dari UPSCALE=3)
+RESCAN_MIN_DUR = 0.2    # segmen Whisper-only lebih pendek dari ini tidak di-rescan
+
 # --- Parameter Blur & Hardsub ---
+# "none"    = tanpa blur (V0) — subtitle ID dibakar apa adanya, paling cepat
 # "static"  = 1 band vertikal FIXED + time-gate (blur hanya nyala saat ada teks) -> murah
 # "dynamic" = box per segmen (tinggi dikunci ke band) -> presisi, tapi N crop+blur+overlay
-# Default dynamic sejak 2026-11-27: band statis mengaburkan wajah/kulit di
-# area yang tidak ada teks (leher di detik ~89) dan radius kecil meninggalkan
-# bayangan glyph Mandarin di latar gelap (detik ~5). Dynamic hanya blur di
-# tempat teks berada, saat teks tampil (+ padding waktu).
-BLUR_MODE = "dynamic"
+# Default none (V0) sejak 2026-11-28, keputusan Taufik setelah perbandingan
+# V0/static/box: V0 tercepat (32,3 dtk vs static 41,2 di T4) dan teks Mandarin
+# yang bertabrakan dengan sub ID diterima sebagai trade-off.
+BLUR_MODE = "none"
 ALWAYS_BLUR = True      # True: band selalu blur (OCR miss tidak bikin Mandarin bocor)
+OUTPUT_720P = True      # output 720p (sisi panjang 1280), keputusan 2026-11-28
 BLUR_RADIUS = 20        # 12 terlalu lemah: glyph putih di latar gelap masih
                         # kelihatan sebagai bercak; 20 + power 3 menghilangkannya
 BLUR_TIME_PAD = 0.4     # dynamic: jendela blur diperlebar ±0.4 detik supaya
@@ -59,21 +71,21 @@ BLUR_PAD_Y = 0.012
 PROGRESS_PCT = 10       # print progress ffmpeg tiap N persen
 FONT_NAME = "Noto Sans"
 
-# --- Parameter Translate ---
-LLM_URL = "https://tiprouter.my.id/v1/chat/completions"
-LLM_MODELS = ["auto", "deepseek-v4.1-flash-1017"]   # diuji: hanya ini yang tersedia di akun
-LLM_BATCH = 20
-LLM_TIMEOUT = 180
-FREE_DELAY = 0.5
-# Polish: baris yang diterjemah lewat MyMemory/Google (paling lemah) dilewatkan
-# sekali lagi lewat LLM supaya bahasanya natural seperti dialog drama.
-# Tidak jalan kalau TIPROUTER_API_KEY kosong; DeepL tidak ikut di-polish
-# karena kualitasnya sudah bagus. Matikan dengan POLISH_WITH_LLM = False
-# kalau tidak mau ada biaya LLM tambahan (±3 batch untuk 45 baris).
-POLISH_WITH_LLM = True
+# --- Parameter Translate (CipRouter, keputusan 2026-11-28: D1-D4) ---
+# Rantai: step-3.7-flash -> auto -> daftar review. Google DIHAPUS (D1:
+# 0/41 dan 0/44 di Colab) dan NLLB DIHAPUS total (D3). Key dari Colab
+# Secrets TIPROUTER_API_KEY — tidak pernah ditulis di notebook.
+CIPROUTER_URL = "https://api.ciprouter.com/v1/chat/completions"
+CIPROUTER_MODEL_PRIMARY = "step-3.7-flash"
+CIPROUTER_MODEL_FALLBACK = "auto"
+CIPROUTER_BATCH = 8
+CIPROUTER_TIMEOUT = 120
+# Nama/istilah yang diganti di teks ZH SEBELUM dikirim ke translator
+# (bukan ke teks ZH yang disimpan): model sering salah menerjemah nama
+# orang dan 闺蜜 — kasus nyata 瘟疫 diterjemah jadi "Wabah".
+NAME_OVERRIDES = {"温薏": "Wen Yi", "韩沐宸": "Han Muchen", "闺蜜": "sahabat"}
 # API key: pakai Colab Secret "TIPROUTER_API_KEY" / env var, atau tempel di sini
 TIPROUTER_API_KEY = ""   # <-- tempel di sini kalau tidak pakai Colab secret
-DEEPL_API_KEY = ""
 # ===================================================
 
 # --- Terapkan profil (menimpa nilai default di atas) ---
@@ -121,7 +133,6 @@ def _get_secret(name, fallback=""):
 
 
 TIPROUTER_API_KEY = _get_secret("TIPROUTER_API_KEY", TIPROUTER_API_KEY)
-DEEPL_API_KEY = _get_secret("DEEPL_API_KEY", DEEPL_API_KEY)
 
 _cache = {}
 if os.path.exists(CACHE_PATH):
@@ -131,10 +142,8 @@ if os.path.exists(CACHE_PATH):
     except Exception:
         _cache = {}
 
-# Provider per baris cache: "deepl" / "google" / "mymemory" / "llm" /
-# "polished" / tidak ada (= cache lama, provider tidak tercatat).
-# Dipakai polish supaya baris yang sudah di-polish tidak di-polish lagi
-# di run berikutnya, dan baris DeepL tidak ikut di-polish.
+# Provider per baris cache: "step" / "auto" / "passthrough" /
+# tidak ada (= cache lama, provider tidak tercatat).
 _cache_prov = {}
 if os.path.exists(CACHE_PROV_PATH):
     try:
